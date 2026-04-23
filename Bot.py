@@ -1,24 +1,29 @@
 """
-Telegram Background Replacement Bot
-=====================================
-Features:
-  - Remove background from any photo
-  - Replace with a solid color
-  - Replace with a preset background (beach, office, studio, etc.)
-  - Replace with a custom image the user sends
+✨ AI Background Generator Bot
+================================
+A Telegram bot that:
+  1. Accepts a user photo
+  2. Optionally removes the background (user's choice)
+  3. Lets the user type a custom AI background prompt
+  4. Generates a unique background via Replicate (Stable Diffusion)
+  5. Composites the photo onto the generated background
+  6. Supports: placement, scale, filter, aspect ratio controls
 
-Requirements:
-  pip install python-telegram-bot rembg Pillow aiohttp aiofiles
-
-Usage:
-  1. Set your BOT_TOKEN in config.py (or as an environment variable)
-  2. Run: python bot.py
+Setup:
+  pip install -r requirements.txt
+  Set BOT_TOKEN and REPLICATE_API_TOKEN in .env or directly below.
 """
 
 import os
 import io
+import time
 import logging
+import requests
 from pathlib import Path
+from PIL import Image, ImageFilter, ImageEnhance
+from rembg import remove
+from dotenv import load_dotenv
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -29,297 +34,477 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from PIL import Image
-from rembg import remove
 
-# ── Logging ────────────────────────────────────────────────────────────────────
+load_dotenv()
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+BOT_TOKEN          = os.getenv("BOT_TOKEN",          "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "r8_AxszYoXMIp71oZzCkk4HEfMJFFhkLP21nQzyG")
+
+REPLICATE_MODEL = "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb652827d1750b9a0d1e47b7b3"
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")   # <-- put your token here
+# ── Conversation States ────────────────────────────────────────────────────────
+(
+    WAITING_PHOTO,
+    ASK_REMOVE_BG,
+    WAITING_PROMPT,
+    CHOOSING_ASPECT,
+    CHOOSING_PLACEMENT,
+    CHOOSING_SCALE,
+    CHOOSING_FILTER,
+    CONFIRMING,
+) = range(8)
 
-PRESETS_DIR = Path("presets")          # folder with preset background images
-PRESETS_DIR.mkdir(exist_ok=True)
-
-# ── Conversation states ────────────────────────────────────────────────────────
-WAITING_FOR_PHOTO      = 0   # user hasn't sent a photo yet
-CHOOSING_BG_TYPE       = 1   # user picks: color / preset / custom
-WAITING_FOR_COLOR      = 2   # user types a hex color or color name
-WAITING_FOR_CUSTOM_BG  = 3   # user sends their own background image
-
-# ── Color name → hex map (common names) ───────────────────────────────────────
-COLOR_NAMES = {
-    "white":   (255, 255, 255),
-    "black":   (0,   0,   0  ),
-    "gray":    (128, 128, 128),
-    "grey":    (128, 128, 128),
-    "red":     (255, 0,   0  ),
-    "green":   (0,   200, 0  ),
-    "blue":    (0,   0,   255),
-    "yellow":  (255, 255, 0  ),
-    "orange":  (255, 165, 0  ),
-    "purple":  (128, 0,   128),
-    "pink":    (255, 182, 193),
-    "cyan":    (0,   255, 255),
-    "navy":    (0,   0,   128),
-    "brown":   (139, 69,  19 ),
-    "beige":   (245, 245, 220),
-    "cream":   (255, 253, 208),
+# ── Filter definitions ─────────────────────────────────────────────────────────
+FILTERS = {
+    "none":        "🎨 None",
+    "warm":        "🔆 Warm",
+    "cool":        "❄️ Cool",
+    "cinematic":   "🎬 Cinematic",
+    "vintage":     "📷 Vintage",
+    "sharp":       "✨ Sharp",
+    "soft":        "🌸 Soft",
+    "grayscale":   "⬛ Grayscale",
 }
 
-# ── Preset backgrounds ─────────────────────────────────────────────────────────
-# Add images named exactly as below into the `presets/` folder.
-# If an image is missing, a colored placeholder is used instead.
-PRESETS = {
-    "🏖️ Beach":        ("beach.jpg",   (135, 206, 235)),
-    "🏢 Office":        ("office.jpg",  (200, 210, 220)),
-    "🌿 Nature":        ("nature.jpg",  (34,  139, 34 )),
-    "🌆 City":          ("city.jpg",    (70,  70,  90 )),
-    "⬜ White Studio":  ("white.jpg",   (255, 255, 255)),
-    "⬛ Black Studio":  ("black.jpg",   (20,  20,  20 )),
-    "🌅 Sunset":        ("sunset.jpg",  (255, 140, 50 )),
-    "🔵 Gradient Blue": ("blue_grad.jpg",(100, 149, 237)),
+ASPECT_RATIOS = {
+    "1:1":   (1024, 1024),
+    "4:3":   (1024, 768),
+    "16:9":  (1024, 576),
+    "9:16":  (576,  1024),
+    "3:4":   (768,  1024),
+}
+
+PLACEMENTS = {
+    "center":       "⬛ Center",
+    "bottom_center":"⬇️ Bottom Center",
+    "bottom_left":  "↙️ Bottom Left",
+    "bottom_right": "↘️ Bottom Right",
+    "top_center":   "⬆️ Top Center",
+}
+
+SCALES = {
+    "small":  0.40,
+    "medium": 0.60,
+    "large":  0.80,
+    "full":   0.95,
 }
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Image Helpers ──────────────────────────────────────────────────────────────
 
-def parse_color(text: str) -> tuple[int, int, int] | None:
-    """Return (R,G,B) from a color name or #RRGGBB hex string, or None."""
-    text = text.strip().lower()
-    if text in COLOR_NAMES:
-        return COLOR_NAMES[text]
-    text = text.lstrip("#")
-    if len(text) == 6:
-        try:
-            r = int(text[0:2], 16)
-            g = int(text[2:4], 16)
-            b = int(text[4:6], 16)
-            return (r, g, b)
-        except ValueError:
-            pass
-    return None
+def do_remove_bg(image_bytes: bytes) -> Image.Image:
+    result = remove(image_bytes)
+    return Image.open(io.BytesIO(result)).convert("RGBA")
 
 
-def remove_background(image_bytes: bytes) -> Image.Image:
-    """Strip the background and return an RGBA PIL image."""
-    result_bytes = remove(image_bytes)
-    return Image.open(io.BytesIO(result_bytes)).convert("RGBA")
+def generate_background(prompt: str, width: int, height: int) -> Image.Image:
+    """Call Replicate Stable Diffusion and return a PIL image."""
+    headers = {
+        "Authorization": f"Token {REPLICATE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "version": REPLICATE_MODEL.split(":")[1],
+        "input": {
+            "prompt": prompt + ", high quality, detailed, photorealistic",
+            "negative_prompt": "blurry, low quality, watermark, text, logo",
+            "width":  width,
+            "height": height,
+            "num_inference_steps": 30,
+            "guidance_scale": 7.5,
+        },
+    }
+
+    # Create prediction
+    resp = requests.post(
+        "https://api.replicate.com/v1/predictions",
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    prediction = resp.json()
+    prediction_id = prediction["id"]
+
+    # Poll until done
+    for _ in range(60):
+        time.sleep(3)
+        poll = requests.get(
+            f"https://api.replicate.com/v1/predictions/{prediction_id}",
+            headers=headers,
+            timeout=15,
+        )
+        poll.raise_for_status()
+        data = poll.json()
+        status = data.get("status")
+        if status == "succeeded":
+            img_url = data["output"][0]
+            img_resp = requests.get(img_url, timeout=30)
+            return Image.open(io.BytesIO(img_resp.content)).convert("RGBA")
+        elif status in ("failed", "canceled"):
+            raise RuntimeError(f"Replicate generation {status}: {data.get('error')}")
+
+    raise TimeoutError("Background generation timed out after 3 minutes.")
 
 
-def composite(foreground: Image.Image, background: Image.Image) -> bytes:
-    """Paste the foreground (RGBA, no bg) onto background; return JPEG bytes."""
-    bg = background.convert("RGBA").resize(foreground.size, Image.LANCZOS)
-    composite_img = Image.alpha_composite(bg, foreground)
-    output = io.BytesIO()
-    composite_img.convert("RGB").save(output, format="JPEG", quality=92)
-    output.seek(0)
-    return output.read()
+def apply_filter(img: Image.Image, filter_name: str) -> Image.Image:
+    img = img.convert("RGB")
+    if filter_name == "none":
+        return img.convert("RGBA")
+    elif filter_name == "warm":
+        r, g, b = img.split()
+        r = ImageEnhance.Brightness(r).enhance(1.15)
+        b = ImageEnhance.Brightness(b).enhance(0.85)
+        img = Image.merge("RGB", (r, g, b))
+    elif filter_name == "cool":
+        r, g, b = img.split()
+        r = ImageEnhance.Brightness(r).enhance(0.85)
+        b = ImageEnhance.Brightness(b).enhance(1.15)
+        img = Image.merge("RGB", (r, g, b))
+    elif filter_name == "cinematic":
+        img = ImageEnhance.Contrast(img).enhance(1.3)
+        img = ImageEnhance.Color(img).enhance(0.85)
+        r, g, b = img.split()
+        r = ImageEnhance.Brightness(r).enhance(1.05)
+        b = ImageEnhance.Brightness(b).enhance(0.92)
+        img = Image.merge("RGB", (r, g, b))
+    elif filter_name == "vintage":
+        img = ImageEnhance.Color(img).enhance(0.6)
+        img = ImageEnhance.Contrast(img).enhance(0.9)
+        img = ImageEnhance.Brightness(img).enhance(1.1)
+    elif filter_name == "sharp":
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    elif filter_name == "soft":
+        img = img.filter(ImageFilter.GaussianBlur(radius=0.8))
+        img = ImageEnhance.Brightness(img).enhance(1.05)
+    elif filter_name == "grayscale":
+        img = img.convert("L").convert("RGB")
+    return img.convert("RGBA")
 
 
-def solid_color_background(size: tuple[int, int], color: tuple[int, int, int]) -> Image.Image:
-    bg = Image.new("RGBA", size, color + (255,))
-    return bg
+def get_paste_position(
+    bg_size: tuple, fg_size: tuple, placement: str
+) -> tuple[int, int]:
+    bw, bh = bg_size
+    fw, fh = fg_size
+    positions = {
+        "center":        ((bw - fw) // 2,          (bh - fh) // 2),
+        "bottom_center": ((bw - fw) // 2,           bh - fh - 20),
+        "bottom_left":   (20,                        bh - fh - 20),
+        "bottom_right":  (bw - fw - 20,              bh - fh - 20),
+        "top_center":    ((bw - fw) // 2,            20),
+    }
+    return positions.get(placement, positions["center"])
 
 
-def load_preset(preset_name: str, size: tuple[int, int]) -> Image.Image:
-    filename, fallback_color = PRESETS[preset_name]
-    path = PRESETS_DIR / filename
-    if path.exists():
-        img = Image.open(path).convert("RGBA")
-        img = img.resize(size, Image.LANCZOS)
-        return img
-    # Fallback: solid color if image file not found
-    return solid_color_background(size, fallback_color)
+def composite_image(
+    subject: Image.Image,
+    background: Image.Image,
+    placement: str,
+    scale: float,
+    filter_name: str,
+) -> bytes:
+    bg = background.convert("RGBA")
+
+    # Scale subject
+    orig_w, orig_h = subject.size
+    max_dim = int(min(bg.size) * scale)
+    ratio = min(max_dim / orig_w, max_dim / orig_h)
+    new_w = int(orig_w * ratio)
+    new_h = int(orig_h * ratio)
+    subject = subject.resize((new_w, new_h), Image.LANCZOS)
+
+    # Apply filter to background
+    bg = apply_filter(bg, filter_name)
+
+    # Paste subject
+    x, y = get_paste_position(bg.size, subject.size, placement)
+    result = bg.copy()
+    result.paste(subject, (x, y), subject)
+
+    # Output
+    out = io.BytesIO()
+    result.convert("RGB").save(out, format="JPEG", quality=93)
+    out.seek(0)
+    return out.read()
 
 
-# ── Command handlers ───────────────────────────────────────────────────────────
+# ── Bot Handlers ───────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
     await update.message.reply_text(
-        "👋 *Welcome to the Background Replacer Bot!*\n\n"
-        "Send me any photo and I'll remove its background and let you replace it "
-        "with a solid color, a preset scene, or your own custom image.\n\n"
-        "📸 *Send a photo to get started!*",
+        "✨ *Welcome to the AI Background Studio Bot!*\n\n"
+        "I'll help you create stunning, one-of-a-kind photos with *AI-generated backgrounds*.\n\n"
+        "🖼 Every background is uniquely generated — no two are the same!\n\n"
+        "📸 *Send me a photo to get started!*",
         parse_mode="Markdown",
     )
-    return WAITING_FOR_PHOTO
+    return WAITING_PHOTO
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "🤖 *How to use this bot:*\n\n"
-        "1. Send any photo\n"
-        "2. Choose a background type:\n"
-        "   • 🎨 *Color* — type a color name or hex code (e.g. `blue` or `#FF5733`)\n"
-        "   • 🖼️ *Preset* — pick from built-in backgrounds\n"
-        "   • 📤 *Custom* — send your own background image\n"
-        "3. Receive your edited photo!\n\n"
-        "Use /start to restart at any time.",
+        "🤖 *How it works:*\n\n"
+        "1. Send a photo\n"
+        "2. Choose whether to remove the background\n"
+        "3. Describe the background you want (in your own words!)\n"
+        "4. Pick aspect ratio, placement, scale & filter\n"
+        "5. Get your unique AI-generated photo!\n\n"
+        "_Use /start to begin. Use /cancel to stop anytime._",
         parse_mode="Markdown",
     )
 
 
-# ── Photo received ─────────────────────────────────────────────────────────────
-
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User sent a photo — download it and ask what background they want."""
-    msg = await update.message.reply_text("⏳ Downloading your photo…")
+    msg = await update.message.reply_text("📥 Downloading your photo…")
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    image_bytes = bytes(await file.download_as_bytearray())
+    context.user_data["original_bytes"] = image_bytes
+    context.user_data["remove_bg"] = False  # default: don't remove
 
-    photo = update.message.photo[-1]           # highest resolution
-    file  = await photo.get_file()
-    image_bytes = await file.download_as_bytearray()
-
-    context.user_data["original_bytes"] = bytes(image_bytes)
-
-    await msg.edit_text("🔍 Got it! What type of background would you like?")
+    await msg.delete()
 
     keyboard = [
-        [InlineKeyboardButton("🎨 Solid Color",   callback_data="type_color")],
-        [InlineKeyboardButton("🖼️ Preset Scene",  callback_data="type_preset")],
-        [InlineKeyboardButton("📤 My Own Image",  callback_data="type_custom")],
+        [
+            InlineKeyboardButton("✅ Yes, remove background", callback_data="removebg_yes"),
+            InlineKeyboardButton("❌ No, keep it",            callback_data="removebg_no"),
+        ]
     ]
     await update.message.reply_text(
-        "Choose a background type:",
+        "🖼 *Do you want to remove the background from your photo?*\n\n"
+        "_Choose YES for a clean cutout, or NO to keep the original photo as-is._",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    return CHOOSING_BG_TYPE
+    return ASK_REMOVE_BG
 
 
-# ── Background type chosen ─────────────────────────────────────────────────────
-
-async def bg_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def remove_bg_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    choice = query.data   # "type_color" | "type_preset" | "type_custom"
 
-    if choice == "type_color":
-        await query.edit_message_text(
-            "🎨 Type a color name (e.g. `blue`, `white`, `black`) or a hex code (e.g. `#FF5733`):",
-            parse_mode="Markdown",
-        )
-        return WAITING_FOR_COLOR
+    remove_bg = query.data == "removebg_yes"
+    context.user_data["remove_bg"] = remove_bg
 
-    elif choice == "type_preset":
-        buttons = [
-            [InlineKeyboardButton(name, callback_data=f"preset_{name}")]
-            for name in PRESETS.keys()
+    label = "✅ Background will be removed." if remove_bg else "❌ Original photo kept as-is."
+    await query.edit_message_text(
+        f"{label}\n\n"
+        "🎨 *Now describe the background you want AI to generate.*\n\n"
+        "Be creative! Examples:\n"
+        "• `luxury penthouse rooftop at sunset`\n"
+        "• `magical forest with glowing lights`\n"
+        "• `futuristic cyberpunk city at night`\n"
+        "• `professional studio with soft bokeh`\n"
+        "• `tropical beach with turquoise water`\n\n"
+        "_Type your background description below:_",
+        parse_mode="Markdown",
+    )
+    return WAITING_PROMPT
+
+
+async def prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if len(prompt) < 3:
+        await update.message.reply_text("Please describe the background in a bit more detail.")
+        return WAITING_PROMPT
+
+    context.user_data["prompt"] = prompt
+
+    keyboard = [
+        [InlineKeyboardButton(ratio, callback_data=f"aspect_{ratio}") for ratio in ASPECT_RATIOS]
+    ]
+    await update.message.reply_text(
+        f"✅ *Prompt saved:* _{prompt}_\n\n"
+        "📐 *Choose an aspect ratio for the final image:*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_ASPECT
+
+
+async def aspect_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    ratio = query.data.replace("aspect_", "")
+    context.user_data["aspect"] = ratio
+
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"place_{key}")]
+        for key, label in PLACEMENTS.items()
+    ]
+    await query.edit_message_text(
+        f"✅ *Aspect ratio:* {ratio}\n\n"
+        "📍 *Where should your photo be placed on the background?*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_PLACEMENT
+
+
+async def placement_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    placement = query.data.replace("place_", "")
+    context.user_data["placement"] = placement
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔹 Small (40%)",  callback_data="scale_small"),
+            InlineKeyboardButton("🔷 Medium (60%)", callback_data="scale_medium"),
+        ],
+        [
+            InlineKeyboardButton("🔶 Large (80%)",  callback_data="scale_large"),
+            InlineKeyboardButton("🟠 Full (95%)",   callback_data="scale_full"),
+        ],
+    ]
+    await query.edit_message_text(
+        f"✅ *Placement:* {PLACEMENTS[placement]}\n\n"
+        "📏 *How large should your photo appear on the background?*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_SCALE
+
+
+async def scale_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    scale_key = query.data.replace("scale_", "")
+    context.user_data["scale"] = scale_key
+
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"filter_{key}")]
+        for key, label in FILTERS.items()
+    ]
+    # Split into rows of 2
+    items = list(FILTERS.items())
+    keyboard = [
+        [
+            InlineKeyboardButton(items[i][1], callback_data=f"filter_{items[i][0]}"),
+            InlineKeyboardButton(items[i+1][1], callback_data=f"filter_{items[i+1][0]}"),
         ]
-        await query.edit_message_text(
-            "🖼️ Choose a preset background:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-        return CHOOSING_BG_TYPE   # stay here to catch preset callback
+        for i in range(0, len(items) - 1, 2)
+    ]
 
-    elif choice == "type_custom":
-        await query.edit_message_text("📤 Send me the image you want to use as the background:")
-        return WAITING_FOR_CUSTOM_BG
+    await query.edit_message_text(
+        f"✅ *Scale:* {scale_key.capitalize()}\n\n"
+        "🎨 *Choose a filter to apply to the background:*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_FILTER
 
-    return CHOOSING_BG_TYPE
 
-
-async def preset_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def filter_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    preset_name = query.data.replace("preset_", "", 1)
+    filter_key = query.data.replace("filter_", "")
+    context.user_data["filter"] = filter_key
 
-    if preset_name not in PRESETS:
-        await query.edit_message_text("❌ Unknown preset. Please try again with /start.")
+    # Show summary before generating
+    d = context.user_data
+    summary = (
+        f"🚀 *Ready to generate! Here's your summary:*\n\n"
+        f"🎨 *Background prompt:* _{d['prompt']}_\n"
+        f"🖼 *Remove background:* {'Yes' if d['remove_bg'] else 'No'}\n"
+        f"📐 *Aspect ratio:* {d['aspect']}\n"
+        f"📍 *Placement:* {PLACEMENTS[d['placement']]}\n"
+        f"📏 *Scale:* {d['scale'].capitalize()}\n"
+        f"✨ *Filter:* {FILTERS[d['filter']]}\n\n"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Generate!", callback_data="confirm_yes"),
+            InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no"),
+        ]
+    ]
+    await query.edit_message_text(
+        summary,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CONFIRMING
+
+
+async def confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "confirm_no":
+        await query.edit_message_text("🔄 Restarting… Send /start to begin again.")
+        context.user_data.clear()
         return ConversationHandler.END
 
-    await query.edit_message_text(f"✨ Applying *{preset_name}* background… please wait.", parse_mode="Markdown")
+    await query.edit_message_text(
+        "⏳ *Generating your unique AI background…*\n\n"
+        "_This usually takes 20–60 seconds. Please wait!_",
+        parse_mode="Markdown",
+    )
 
-    image_bytes = context.user_data.get("original_bytes")
-    if not image_bytes:
-        await query.message.reply_text("❌ Original photo not found. Please start over with /start.")
-        return ConversationHandler.END
+    d = context.user_data
+    image_bytes   = d["original_bytes"]
+    remove_bg_opt = d["remove_bg"]
+    prompt        = d["prompt"]
+    aspect        = d["aspect"]
+    placement     = d["placement"]
+    scale_key     = d["scale"]
+    filter_key    = d["filter"]
+
+    width, height = ASPECT_RATIOS[aspect]
+    scale_val     = SCALES[scale_key]
 
     try:
-        fg    = remove_background(image_bytes)
-        bg    = load_preset(preset_name, fg.size)
-        final = composite(fg, bg)
-        await query.message.reply_photo(photo=final, caption=f"✅ Background replaced with {preset_name}!")
+        # Step 1: Remove background if requested
+        if remove_bg_opt:
+            await query.message.reply_text("✂️ Removing background…")
+            subject = do_remove_bg(image_bytes)
+        else:
+            subject = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+
+        # Step 2: Generate background
+        await query.message.reply_text("🎨 Generating AI background… (this takes ~30–60 seconds)")
+        background = generate_background(prompt, width, height)
+
+        # Step 3: Composite
+        await query.message.reply_text("🖼 Compositing your photo…")
+        final_bytes = composite_image(subject, background, placement, scale_val, filter_key)
+
+        # Step 4: Send result
+        caption = (
+            f"✅ *Here's your unique AI photo!*\n\n"
+            f"🎨 _{prompt}_\n"
+            f"Filter: {FILTERS[filter_key]} | Scale: {scale_key.capitalize()} | {aspect}"
+        )
+        await query.message.reply_photo(photo=final_bytes, caption=caption, parse_mode="Markdown")
+        await query.message.reply_text(
+            "Want another? Send a new photo anytime, or /start to begin fresh!\n"
+            "Each generation is 100% unique 🎲"
+        )
+
     except Exception as e:
-        logger.error(f"Error applying preset: {e}")
-        await query.message.reply_text("❌ Something went wrong. Please try again.")
-
-    return ConversationHandler.END
-
-
-# ── Color path ─────────────────────────────────────────────────────────────────
-
-async def color_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    color = parse_color(update.message.text or "")
-    if not color:
-        await update.message.reply_text(
-            "❌ Couldn't understand that color. Try a name like `blue` or a hex like `#3498DB`:",
+        logger.error(f"Generation error: {e}")
+        await query.message.reply_text(
+            f"❌ Something went wrong: `{str(e)[:200]}`\n\n"
+            "Please try again with /start.",
             parse_mode="Markdown",
         )
-        return WAITING_FOR_COLOR
-
-    msg = await update.message.reply_text("✨ Removing background and applying color…")
-    image_bytes = context.user_data.get("original_bytes")
-    if not image_bytes:
-        await msg.edit_text("❌ Original photo not found. Please start over with /start.")
-        return ConversationHandler.END
-
-    try:
-        fg    = remove_background(image_bytes)
-        bg    = solid_color_background(fg.size, color)
-        final = composite(fg, bg)
-        hex_str = "#{:02X}{:02X}{:02X}".format(*color)
-        await update.message.reply_photo(photo=final, caption=f"✅ Background replaced with {hex_str}!")
-        await msg.delete()
-    except Exception as e:
-        logger.error(f"Error applying color: {e}")
-        await msg.edit_text("❌ Something went wrong. Please try again.")
 
     return ConversationHandler.END
 
-
-# ── Custom background path ─────────────────────────────────────────────────────
-
-async def custom_bg_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message.photo and not update.message.document:
-        await update.message.reply_text("Please send an image file as a photo or document.")
-        return WAITING_FOR_CUSTOM_BG
-
-    msg = await update.message.reply_text("✨ Processing… this may take a moment.")
-
-    # Download background image
-    if update.message.photo:
-        bg_file = await update.message.photo[-1].get_file()
-    else:
-        bg_file = await update.message.document.get_file()
-    bg_bytes = await bg_file.download_as_bytearray()
-
-    image_bytes = context.user_data.get("original_bytes")
-    if not image_bytes:
-        await msg.edit_text("❌ Original photo not found. Please start over with /start.")
-        return ConversationHandler.END
-
-    try:
-        fg         = remove_background(image_bytes)
-        bg_img     = Image.open(io.BytesIO(bytes(bg_bytes))).convert("RGBA")
-        final      = composite(fg, bg_img)
-        await update.message.reply_photo(photo=final, caption="✅ Background replaced with your custom image!")
-        await msg.delete()
-    except Exception as e:
-        logger.error(f"Error applying custom bg: {e}")
-        await msg.edit_text("❌ Something went wrong. Please try again.")
-
-    return ConversationHandler.END
-
-
-# ── Cancel ─────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ Cancelled. Send /start to begin again.")
     context.user_data.clear()
+    await update.message.reply_text("❌ Cancelled. Send /start to begin again.")
     return ConversationHandler.END
 
 
@@ -328,34 +513,29 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
+    conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
             MessageHandler(filters.PHOTO, photo_received),
         ],
         states={
-            WAITING_FOR_PHOTO: [
-                MessageHandler(filters.PHOTO, photo_received),
-            ],
-            CHOOSING_BG_TYPE: [
-                CallbackQueryHandler(bg_type_chosen,  pattern="^type_"),
-                CallbackQueryHandler(preset_chosen,   pattern="^preset_"),
-            ],
-            WAITING_FOR_COLOR: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, color_received),
-            ],
-            WAITING_FOR_CUSTOM_BG: [
-                MessageHandler(filters.PHOTO | filters.Document.IMAGE, custom_bg_received),
-            ],
+            WAITING_PHOTO:     [MessageHandler(filters.PHOTO, photo_received)],
+            ASK_REMOVE_BG:     [CallbackQueryHandler(remove_bg_chosen, pattern="^removebg_")],
+            WAITING_PROMPT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_received)],
+            CHOOSING_ASPECT:   [CallbackQueryHandler(aspect_chosen,    pattern="^aspect_")],
+            CHOOSING_PLACEMENT:[CallbackQueryHandler(placement_chosen, pattern="^place_")],
+            CHOOSING_SCALE:    [CallbackQueryHandler(scale_chosen,     pattern="^scale_")],
+            CHOOSING_FILTER:   [CallbackQueryHandler(filter_chosen,    pattern="^filter_")],
+            CONFIRMING:        [CallbackQueryHandler(confirmed,        pattern="^confirm_")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
 
-    app.add_handler(conv_handler)
+    app.add_handler(conv)
     app.add_handler(CommandHandler("help", help_cmd))
 
-    logger.info("Bot is running…")
+    logger.info("🚀 AI Background Studio Bot is running…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

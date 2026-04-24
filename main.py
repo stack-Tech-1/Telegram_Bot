@@ -38,11 +38,11 @@ from telegram.ext import (
 load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN    = os.getenv("BOT_TOKEN",          "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
+BOT_TOKEN   = os.getenv("BOT_TOKEN")
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
 # Hugging Face model - free to use
-HF_MODEL = "stabilityai/stable-diffusion-2-1"
+HF_MODEL = "black-forest-labs/FLUX.1-schnell"
 HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 logging.basicConfig(
@@ -113,13 +113,11 @@ def generate_background(prompt: str, width: int, height: int) -> Image.Image:
         "Content-Type": "application/json",
     }
     payload = {
-        "inputs": prompt + ", high quality, detailed, photorealistic, 8k",
+        "inputs": prompt + ", high quality, detailed, photorealistic, 8k, no people, no humans",
         "parameters": {
-            "negative_prompt": "blurry, low quality, watermark, text, logo, person, human, face",
             "width":  min(width, 768),
             "height": min(height, 768),
-            "num_inference_steps": 30,
-            "guidance_scale": 7.5,
+            "num_inference_steps": 4,
         },
     }
 

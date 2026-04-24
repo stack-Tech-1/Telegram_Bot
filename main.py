@@ -42,6 +42,9 @@ load_dotenv()
 BOT_TOKEN   = os.getenv("BOT_TOKEN", "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
+if not HF_API_TOKEN:
+    raise ValueError("HF_API_TOKEN is not set. Check your environment variables.")
+
 # Hugging Face model via new router endpoint
 HF_MODEL = "black-forest-labs/FLUX.1-schnell"
 HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}/v1/text-to-image"

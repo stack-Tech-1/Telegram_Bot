@@ -48,8 +48,8 @@ if not HF_API_TOKEN:
     raise SystemExit("❌ HF_API_TOKEN is missing! Set it in Railway Variables.")
 
 # Hugging Face model via new router endpoint
-HF_MODEL = "black-forest-labs/FLUX.1-schnell"
-HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}/v1/text-to-image"
+HF_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -119,14 +119,8 @@ def generate_background(prompt: str, width: int, height: int) -> Image.Image:
         "Content-Type": "application/json",
     }
     payload = {
-        "inputs": prompt + ", high quality, detailed, photorealistic, 8k, no people, no humans",
-        "parameters": {
-            "width":  min(width, 768),
-            "height": min(height, 768),
-            "num_inference_steps": 4,
-            "guidance_scale": 3.5,
-        },
-    }
+    "inputs": prompt + ", high quality, photorealistic, no people, background only",
+}
 
     # New HF router endpoint returns image bytes directly
     for attempt in range(3):

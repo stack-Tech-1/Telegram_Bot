@@ -286,11 +286,18 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     presets = get_presets(context, uid)
     bgs = get_bg_images(context, uid)
 
+    async def safe_edit(text, reply_markup=None, parse_mode="Markdown"):
+        """Edit message whether it's a photo (caption) or text."""
+        kwargs = {"parse_mode": parse_mode}
+        if reply_markup:
+            kwargs["reply_markup"] = reply_markup
+        try:
+            await query.edit_message_caption(text, **kwargs)
+        except Exception:
+            await query.edit_message_text(text, **kwargs)
+
     if query.data == "go_process":
-        await query.edit_message_text(
-            "📸 *Send me the photo you want to process!*",
-            parse_mode="Markdown",
-        )
+        await safe_edit("📸 *Send me the photo you want to process!*")
         return WAITING_PHOTO
 
     elif query.data == "go_backgrounds":
@@ -300,30 +307,18 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await show_presets_menu(query, context, uid)
 
     elif query.data == "back_home":
-        # FIX 3: use try/except to handle both photo messages (caption) and text messages
         keyboard = [
             [InlineKeyboardButton("📸 Process a Photo", callback_data="go_process")],
             [InlineKeyboardButton("🖼️ My Backgrounds",  callback_data="go_backgrounds"),
              InlineKeyboardButton("⚙️ My Presets",      callback_data="go_presets")],
         ]
-        text = (
+        await safe_edit(
             "✨ *AI Background Studio*\n\n"
             f"🖼️ Saved backgrounds: *{len(bgs)}/{MAX_BG_IMAGES}*\n"
             f"⚙️ Saved presets: *{len(presets)}/{MAX_PRESETS}*\n\n"
-            "What would you like to do?"
+            "What would you like to do?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        try:
-            await query.edit_message_caption(
-                text,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        except Exception:
-            await query.edit_message_text(
-                text,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
         return WAITING_PHOTO
 
     return WAITING_PHOTO

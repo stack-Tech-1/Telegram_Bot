@@ -645,7 +645,11 @@ async def result_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return SAVE_PRESET_NAME
 
     elif query.data in ("confirm_yes", "generate_again"):
-        await query.edit_message_text("⏳ *Working on it…*", parse_mode="Markdown")
+        try:
+            await query.edit_message_caption("⏳ *Working on it…*", parse_mode="Markdown")
+        except Exception:
+            # Fallback: message might be text (first generation), not a photo
+            await query.edit_message_text("⏳ *Working on it…*", parse_mode="Markdown")
         await do_generate(query.message, context, query.from_user.id)
         return RESULT_ACTIONS
 

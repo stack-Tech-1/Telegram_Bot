@@ -39,7 +39,7 @@ load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN    = os.getenv("BOT_TOKEN",          "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
-HF_API_TOKEN = os.getenv("HF_API_TOKEN", "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")
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
 # Hugging Face model - free to use
 HF_MODEL = "stabilityai/stable-diffusion-2-1"

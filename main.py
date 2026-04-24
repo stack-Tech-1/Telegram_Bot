@@ -28,6 +28,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ConversationHandler,
+    PicklePersistence,  # FIX 1: import persistence
     filters,
     ContextTypes,
 )
@@ -299,19 +300,30 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await show_presets_menu(query, context, uid)
 
     elif query.data == "back_home":
+        # FIX 3: use try/except to handle both photo messages (caption) and text messages
         keyboard = [
             [InlineKeyboardButton("📸 Process a Photo", callback_data="go_process")],
             [InlineKeyboardButton("🖼️ My Backgrounds",  callback_data="go_backgrounds"),
              InlineKeyboardButton("⚙️ My Presets",      callback_data="go_presets")],
         ]
-        await query.edit_message_text(
+        text = (
             "✨ *AI Background Studio*\n\n"
             f"🖼️ Saved backgrounds: *{len(bgs)}/{MAX_BG_IMAGES}*\n"
             f"⚙️ Saved presets: *{len(presets)}/{MAX_PRESETS}*\n\n"
-            "What would you like to do?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "What would you like to do?"
         )
+        try:
+            await query.edit_message_caption(
+                text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
         return WAITING_PHOTO
 
     return WAITING_PHOTO
@@ -645,11 +657,20 @@ async def result_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return SAVE_PRESET_NAME
 
     elif query.data in ("confirm_yes", "generate_again"):
+        # FIX 2: pick a new random background each time "Generate Again" is clicked
+        if query.data == "generate_again" and context.user_data.get("bg_type") == "saved":
+            import random
+            uid = query.from_user.id
+            bgs = get_bg_images(context, uid)
+            if bgs:
+                context.user_data["saved_bg_index"] = random.randint(0, len(bgs) - 1)
+
+        # FIX 1 (part): handle photo vs text message when showing "working" status
         try:
             await query.edit_message_caption("⏳ *Working on it…*", parse_mode="Markdown")
         except Exception:
-            # Fallback: message might be text (first generation), not a photo
             await query.edit_message_text("⏳ *Working on it…*", parse_mode="Markdown")
+
         await do_generate(query.message, context, query.from_user.id)
         return RESULT_ACTIONS
 
@@ -779,7 +800,6 @@ async def backgrounds_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif query.data == "bg_clear":
         save_bg_images(context, uid, [])
-        await query.edit_message_text("🗑️ All backgrounds cleared!")
         keyboard = [[InlineKeyboardButton("◀️ Back to Menu", callback_data="back_home")]]
         await query.edit_message_text(
             "🗑️ All backgrounds cleared!",
@@ -915,7 +935,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
+    # FIX 1: Add PicklePersistence so bot_data (backgrounds & presets) survives restarts
+    persistence = PicklePersistence(filepath="bot_persistence.pkl")
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],

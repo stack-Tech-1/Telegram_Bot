@@ -12,6 +12,7 @@ A Telegram bot that:
 Setup:
   pip install -r requirements.txt
   Set BOT_TOKEN and HF_API_TOKEN in .env or directly below.
+  HF token needs "Make calls to the serverless Inference API" permission.
 """
 
 import os
@@ -41,9 +42,9 @@ load_dotenv()
 BOT_TOKEN   = os.getenv("BOT_TOKEN", "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
-# Hugging Face model - free to use
+# Hugging Face model via new router endpoint
 HF_MODEL = "black-forest-labs/FLUX.1-schnell"
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}/v1/text-to-image"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -118,10 +119,11 @@ def generate_background(prompt: str, width: int, height: int) -> Image.Image:
             "width":  min(width, 768),
             "height": min(height, 768),
             "num_inference_steps": 4,
+            "guidance_scale": 3.5,
         },
     }
 
-    # HF returns image bytes directly (or JSON error)
+    # New HF router endpoint returns image bytes directly
     for attempt in range(3):
         resp = requests.post(
             HF_API_URL,
@@ -130,16 +132,39 @@ def generate_background(prompt: str, width: int, height: int) -> Image.Image:
             timeout=120,
         )
 
-        # Model loading — wait and retry
         if resp.status_code == 503:
-            wait = resp.json().get("estimated_time", 20)
+            try:
+                wait = resp.json().get("estimated_time", 20)
+            except Exception:
+                wait = 20
             logger.info(f"Model loading, waiting {wait}s…")
             time.sleep(min(float(wait), 30))
             continue
 
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                err = resp.json()
+            except Exception:
+                err = resp.text
+            raise RuntimeError(f"HF API error {resp.status_code}: {err}")
 
-        # Success — response is raw image bytes
+        # Check content type — should be image
+        content_type = resp.headers.get("content-type", "")
+        if "image" in content_type:
+            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+
+        # Sometimes returns JSON with image URL
+        try:
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                img_url = data[0].get("url") or data[0].get("image")
+                if img_url:
+                    img_resp = requests.get(img_url, timeout=30)
+                    return Image.open(io.BytesIO(img_resp.content)).convert("RGBA")
+        except Exception:
+            pass
+
+        # Last resort — try treating content as image bytes
         return Image.open(io.BytesIO(resp.content)).convert("RGBA")
 
     raise TimeoutError("Hugging Face model took too long to load. Please try again in a moment.")

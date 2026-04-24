@@ -39,8 +39,8 @@ from telegram.ext import (
 load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.getenv("BOT_TOKEN","")
-HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "")
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")
 
 # Hugging Face model via new router endpoint
 HF_MODEL = "black-forest-labs/FLUX.1-schnell"

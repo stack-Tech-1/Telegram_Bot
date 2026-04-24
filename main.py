@@ -5,13 +5,13 @@ A Telegram bot that:
   1. Accepts a user photo
   2. Optionally removes the background (user's choice)
   3. Lets the user type a custom AI background prompt
-  4. Generates a unique background via Replicate (Stable Diffusion)
+  4. Generates a unique background via Hugging Face Inference API (free)
   5. Composites the photo onto the generated background
   6. Supports: placement, scale, filter, aspect ratio controls
 
 Setup:
   pip install -r requirements.txt
-  Set BOT_TOKEN and REPLICATE_API_TOKEN in .env or directly below.
+  Set BOT_TOKEN and HF_API_TOKEN in .env or directly below.
 """
 
 import os
@@ -38,10 +38,12 @@ from telegram.ext import (
 load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN          = os.getenv("BOT_TOKEN",          "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
-REPLICATE_API_TOKEN = os.getenv("HF_API_TOKEN", "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")
+BOT_TOKEN    = os.getenv("BOT_TOKEN",          "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
+HF_API_TOKEN = os.getenv("HF_API_TOKEN", "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")
 
-REPLICATE_MODEL = "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb652827d1750b9a0d1e47b7b3"
+# Hugging Face model - free to use
+HF_MODEL = "stabilityai/stable-diffusion-2-1"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -105,53 +107,44 @@ def do_remove_bg(image_bytes: bytes) -> Image.Image:
 
 
 def generate_background(prompt: str, width: int, height: int) -> Image.Image:
-    """Call Replicate Stable Diffusion and return a PIL image."""
+    """Call Hugging Face Inference API and return a PIL image."""
     headers = {
-        "Authorization": f"Token {REPLICATE_API_TOKEN}",
+        "Authorization": f"Bearer {HF_API_TOKEN}",
         "Content-Type": "application/json",
     }
     payload = {
-        "version": REPLICATE_MODEL.split(":")[1],
-        "input": {
-            "prompt": prompt + ", high quality, detailed, photorealistic",
-            "negative_prompt": "blurry, low quality, watermark, text, logo",
-            "width":  width,
-            "height": height,
+        "inputs": prompt + ", high quality, detailed, photorealistic, 8k",
+        "parameters": {
+            "negative_prompt": "blurry, low quality, watermark, text, logo, person, human, face",
+            "width":  min(width, 768),
+            "height": min(height, 768),
             "num_inference_steps": 30,
             "guidance_scale": 7.5,
         },
     }
 
-    # Create prediction
-    resp = requests.post(
-        "https://api.replicate.com/v1/predictions",
-        json=payload,
-        headers=headers,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    prediction = resp.json()
-    prediction_id = prediction["id"]
-
-    # Poll until done
-    for _ in range(60):
-        time.sleep(3)
-        poll = requests.get(
-            f"https://api.replicate.com/v1/predictions/{prediction_id}",
+    # HF returns image bytes directly (or JSON error)
+    for attempt in range(3):
+        resp = requests.post(
+            HF_API_URL,
+            json=payload,
             headers=headers,
-            timeout=15,
+            timeout=120,
         )
-        poll.raise_for_status()
-        data = poll.json()
-        status = data.get("status")
-        if status == "succeeded":
-            img_url = data["output"][0]
-            img_resp = requests.get(img_url, timeout=30)
-            return Image.open(io.BytesIO(img_resp.content)).convert("RGBA")
-        elif status in ("failed", "canceled"):
-            raise RuntimeError(f"Replicate generation {status}: {data.get('error')}")
 
-    raise TimeoutError("Background generation timed out after 3 minutes.")
+        # Model loading — wait and retry
+        if resp.status_code == 503:
+            wait = resp.json().get("estimated_time", 20)
+            logger.info(f"Model loading, waiting {wait}s…")
+            time.sleep(min(float(wait), 30))
+            continue
+
+        resp.raise_for_status()
+
+        # Success — response is raw image bytes
+        return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+
+    raise TimeoutError("Hugging Face model took too long to load. Please try again in a moment.")
 
 
 def apply_filter(img: Image.Image, filter_name: str) -> Image.Image:

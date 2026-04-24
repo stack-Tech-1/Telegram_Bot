@@ -40,12 +40,10 @@ load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN    = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
-HF_API_TOKEN = os.getenv("HF_API_TOKEN", "").strip().strip('"').strip("'")
+
 
 if not BOT_TOKEN:
     raise SystemExit("❌ BOT_TOKEN is missing! Set it in Railway Variables.")
-if not HF_API_TOKEN:
-    raise SystemExit("❌ HF_API_TOKEN is missing! Set it in Railway Variables.")
 
 # Hugging Face model via new router endpoint
 HF_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
@@ -111,63 +109,13 @@ def do_remove_bg(image_bytes: bytes) -> Image.Image:
     result = remove(image_bytes)
     return Image.open(io.BytesIO(result)).convert("RGBA")
 
-
 def generate_background(prompt: str, width: int, height: int) -> Image.Image:
-    """Call Hugging Face Inference API and return a PIL image."""
-    headers = {
-        "Authorization": f"Bearer {HF_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-    "inputs": prompt + ", high quality, photorealistic, no people, background only",
-}
-
-    # New HF router endpoint returns image bytes directly
-    for attempt in range(3):
-        resp = requests.post(
-            HF_API_URL,
-            json=payload,
-            headers=headers,
-            timeout=120,
-        )
-
-        if resp.status_code == 503:
-            try:
-                wait = resp.json().get("estimated_time", 20)
-            except Exception:
-                wait = 20
-            logger.info(f"Model loading, waiting {wait}s…")
-            time.sleep(min(float(wait), 30))
-            continue
-
-        if not resp.ok:
-            try:
-                err = resp.json()
-            except Exception:
-                err = resp.text
-            raise RuntimeError(f"HF API error {resp.status_code}: {err}")
-
-        # Check content type — should be image
-        content_type = resp.headers.get("content-type", "")
-        if "image" in content_type:
-            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-
-        # Sometimes returns JSON with image URL
-        try:
-            data = resp.json()
-            if isinstance(data, list) and len(data) > 0:
-                img_url = data[0].get("url") or data[0].get("image")
-                if img_url:
-                    img_resp = requests.get(img_url, timeout=30)
-                    return Image.open(io.BytesIO(img_resp.content)).convert("RGBA")
-        except Exception:
-            pass
-
-        # Last resort — try treating content as image bytes
-        return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-
-    raise TimeoutError("Hugging Face model took too long to load. Please try again in a moment.")
-
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt + ", high quality, photorealistic, no people, background only")
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={min(width,1024)}&height={min(height,1024)}&nologo=true&seed={int(time.time())}"
+    resp = requests.get(url, timeout=120)
+    resp.raise_for_status()
+    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
 
 def apply_filter(img: Image.Image, filter_name: str) -> Image.Image:
     img = img.convert("RGB")

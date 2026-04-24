@@ -39,7 +39,7 @@ load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN          = os.getenv("BOT_TOKEN",          "8747707317:AAG8BGaiU0HRMm-YpRk4hEfIQ0iHsZAhLEc")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "r8_AgOyWooO1De933TbjOxZAmNb9jyk1g80qhSYz")
+REPLICATE_API_TOKEN = os.getenv("HF_API_TOKEN", "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")
 
 REPLICATE_MODEL = "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb652827d1750b9a0d1e47b7b3"
 

@@ -1,19 +1,18 @@
 """
-✨ AI Background Studio Bot — Batch Edition
-=============================================
+✨ AI Background Studio Bot — Enhanced Edition
+================================================
 Features:
-  - Upload up to 100 photos to a personal library
-  - Configure settings (prompt, aspect ratio, placement, scale, filter, versions)
-  - One-tap batch generation: all photos × N versions with unique AI backgrounds
-  - Export/import settings templates to share with workers
-  - Parallel generation for speed
+  - Generate AI backgrounds (Pollinations.AI - free, no token needed)
+  - Use your own uploaded background images
+  - Save & reuse settings presets
+  - Export/import presets to share with workers
+  - One-tap "Generate Again" for instant new versions
 """
 
 import os
 import io
 import time
 import json
-import asyncio
 import logging
 import hashlib
 import urllib.parse
@@ -38,14 +37,10 @@ load_dotenv()
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
 if not BOT_TOKEN:
-    raise SystemExit("❌ BOT_TOKEN is missing!")
+    raise SystemExit("❌ BOT_TOKEN is missing! Set it in Railway Variables.")
 
-# Authorized user IDs (empty = allow everyone, fill to restrict)
-# Example: ALLOWED_USERS = {123456789, 987654321}
-ALLOWED_USERS: set = set()
-
-MAX_PHOTOS = 100
-MAX_PARALLEL = 5  # generate this many backgrounds at once
+MAX_BG_IMAGES = 20  # max saved background images per user
+MAX_PRESETS   = 10  # max saved presets per user
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -55,28 +50,34 @@ logger = logging.getLogger(__name__)
 
 # ── Conversation States ────────────────────────────────────────────────────────
 (
-    MAIN_MENU,
-    UPLOADING_PHOTOS,
-    IN_SETTINGS,
-    SETTINGS_PROMPT,
-    SETTINGS_ASPECT,
-    SETTINGS_PLACEMENT,
-    SETTINGS_SCALE,
-    SETTINGS_FILTER,
-    SETTINGS_VERSIONS,
-    SETTINGS_REMOVE_BG,
-    IMPORT_TEMPLATE,
-) = range(11)
+    WAITING_PHOTO,
+    CHOOSE_BG_TYPE,
+    WAITING_AI_PROMPT,
+    CHOOSE_SAVED_BG,
+    CHOOSING_PRESET_OR_MANUAL,
+    CHOOSING_ASPECT,
+    CHOOSING_PLACEMENT,
+    CHOOSING_SCALE,
+    CHOOSING_FILTER,
+    CHOOSING_REMOVE_BG,
+    SAVE_PRESET_NAME,
+    MANAGE_PRESETS,
+    MANAGE_BACKGROUNDS,
+    UPLOADING_BACKGROUNDS,
+    IMPORT_PRESET,
+    RESULT_ACTIONS,
+) = range(16)
 
-# ── Defaults ───────────────────────────────────────────────────────────────────
-DEFAULT_SETTINGS = {
-    "prompt":     "professional studio background with soft bokeh",
-    "aspect":     "1:1",
-    "placement":  "bottom_center",
-    "scale":      "large",
-    "filter":     "none",
-    "versions":   2,
-    "remove_bg":  True,
+# ── Constants ──────────────────────────────────────────────────────────────────
+FILTERS = {
+    "none":      "🎨 None",
+    "warm":      "🔆 Warm",
+    "cool":      "❄️ Cool",
+    "cinematic": "🎬 Cinematic",
+    "vintage":   "📷 Vintage",
+    "sharp":     "✨ Sharp",
+    "soft":      "🌸 Soft",
+    "grayscale": "⬛ Grayscale",
 }
 
 ASPECT_RATIOS = {
@@ -102,49 +103,47 @@ SCALES = {
     "full":   0.95,
 }
 
-FILTERS = {
-    "none":      "🎨 None",
-    "warm":      "🔆 Warm",
-    "cool":      "❄️ Cool",
-    "cinematic": "🎬 Cinematic",
-    "vintage":   "📷 Vintage",
-    "sharp":     "✨ Sharp",
-    "soft":      "🌸 Soft",
-    "grayscale": "⬛ Grayscale",
+DEFAULT_SETTINGS = {
+    "aspect":     "1:1",
+    "placement":  "bottom_center",
+    "scale":      "large",
+    "filter":     "none",
+    "remove_bg":  True,
 }
 
 
-# ── Per-user data helpers ──────────────────────────────────────────────────────
-# Stored in context.bot_data keyed by user_id (persists for session)
+# ── User Data Helpers ──────────────────────────────────────────────────────────
 
-def get_user_photos(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> list:
-    return context.bot_data.setdefault(f"photos_{user_id}", [])
+def get_bg_images(ctx, uid):
+    return ctx.bot_data.setdefault(f"bg_{uid}", [])
 
-def get_user_settings(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
-    stored = context.bot_data.get(f"settings_{user_id}", {})
-    return {**DEFAULT_SETTINGS, **stored}
+def save_bg_images(ctx, uid, images):
+    ctx.bot_data[f"bg_{uid}"] = images
 
-def save_user_settings(context: ContextTypes.DEFAULT_TYPE, user_id: int, settings: dict):
-    context.bot_data[f"settings_{user_id}"] = settings
+def get_presets(ctx, uid):
+    return ctx.bot_data.setdefault(f"presets_{uid}", {})
+
+def save_presets(ctx, uid, presets):
+    ctx.bot_data[f"presets_{uid}"] = presets
 
 
 # ── Image Processing ───────────────────────────────────────────────────────────
 
-def remove_background(image_bytes: bytes) -> Image.Image:
+def do_remove_bg(image_bytes: bytes) -> Image.Image:
     result = remove(image_bytes)
     return Image.open(io.BytesIO(result)).convert("RGBA")
 
 
-def generate_background(prompt: str, width: int, height: int, seed: int = None) -> Image.Image:
-    if seed is None:
-        seed = int(time.time() * 1000) % 999999
-    full_prompt = prompt + ", high quality, photorealistic, scenic, no people, no humans, background only"
-    encoded = urllib.parse.quote(full_prompt)
+def generate_ai_background(prompt: str, width: int, height: int) -> Image.Image:
+    full = prompt + ", high quality, photorealistic, scenic, no people, no humans, background only"
+    encoded = urllib.parse.quote(full)
+    seed = int(time.time() * 1000) % 999999
     url = (
         f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width={min(width, 1024)}&height={min(height, 1024)}"
+        f"?width={min(width,1024)}&height={min(height,1024)}"
         f"&nologo=true&enhance=true&seed={seed}"
     )
+    logger.info(f"Pollinations seed={seed}")
     resp = requests.get(url, timeout=120)
     resp.raise_for_status()
     return Image.open(io.BytesIO(resp.content)).convert("RGBA")
@@ -196,8 +195,12 @@ def get_paste_position(bg_size, fg_size, placement):
     return positions.get(placement, positions["center"])
 
 
-def composite(subject: Image.Image, background: Image.Image,
-              placement: str, scale: float, filter_name: str) -> bytes:
+def composite_image(subject, background, placement, scale, filter_name):
+    bg = background.convert("RGBA").resize(
+        (ASPECT_RATIOS.get("1:1", (1024,1024))), Image.LANCZOS
+    ) if background.size != subject.size else background.convert("RGBA")
+
+    # Resize bg to match aspect ratio dimensions stored in context
     bg = background.convert("RGBA")
     ow, oh = subject.size
     max_dim = int(min(bg.size) * scale)
@@ -213,556 +216,695 @@ def composite(subject: Image.Image, background: Image.Image,
     return out.read()
 
 
-# ── Settings template encoding ─────────────────────────────────────────────────
+# ── Preset Encoding ────────────────────────────────────────────────────────────
 
-def encode_template(settings: dict) -> str:
-    """Encode settings to a short shareable string."""
-    data = json.dumps(settings, separators=(",", ":"))
-    encoded = urllib.parse.quote(data)
-    # Create a short checksum
+def encode_preset(settings: dict) -> str:
+    data = json.dumps(settings, separators=(",", ":"), sort_keys=True)
     checksum = hashlib.md5(data.encode()).hexdigest()[:4].upper()
-    return f"TMPL-{checksum}-{encoded}"
+    encoded = urllib.parse.quote(data)
+    return f"PRESET-{checksum}-{encoded}"
 
 
-def decode_template(template_str: str) -> dict | None:
-    """Decode a settings template string."""
+def decode_preset(code: str) -> dict | None:
     try:
-        if not template_str.startswith("TMPL-"):
+        if not code.startswith("PRESET-"):
             return None
-        parts = template_str.split("-", 2)
+        parts = code.split("-", 2)
         if len(parts) != 3:
             return None
-        encoded = parts[2]
-        data = urllib.parse.unquote(encoded)
+        data = urllib.parse.unquote(parts[2])
         settings = json.loads(data)
-        # Validate keys
-        for key in DEFAULT_SETTINGS:
-            if key not in settings:
+        for k in DEFAULT_SETTINGS:
+            if k not in settings:
                 return None
         return settings
     except Exception:
         return None
 
 
-# ── Keyboards ──────────────────────────────────────────────────────────────────
+# ── Settings Summary ───────────────────────────────────────────────────────────
 
-def main_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Upload Photos", callback_data="menu_upload")],
-        [InlineKeyboardButton("⚡ Generate Unique Photos", callback_data="menu_generate")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
-    ])
-
-
-def settings_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎨 Background Style",  callback_data="set_prompt")],
-        [InlineKeyboardButton("📐 Aspect Ratio",      callback_data="set_aspect")],
-        [InlineKeyboardButton("📍 Placement",          callback_data="set_placement")],
-        [InlineKeyboardButton("📏 Scale",              callback_data="set_scale")],
-        [InlineKeyboardButton("✨ Filter",             callback_data="set_filter")],
-        [InlineKeyboardButton("🔢 Versions per Photo", callback_data="set_versions")],
-        [InlineKeyboardButton("✂️ Remove Background",  callback_data="set_removebg")],
-        [InlineKeyboardButton("📤 Export Template",    callback_data="set_export")],
-        [InlineKeyboardButton("📥 Import Template",    callback_data="set_import")],
-        [InlineKeyboardButton("◀️ Back to Menu",       callback_data="menu_back")],
-    ])
+def settings_summary(s: dict) -> str:
+    return (
+        f"📐 Aspect: *{s['aspect']}*\n"
+        f"📍 Placement: *{PLACEMENTS[s['placement']]}*\n"
+        f"📏 Scale: *{s['scale'].capitalize()}*\n"
+        f"✨ Filter: *{FILTERS[s['filter']]}*\n"
+        f"✂️ Remove BG: *{'Yes' if s['remove_bg'] else 'No'}*"
+    )
 
 
-# ── Handlers ───────────────────────────────────────────────────────────────────
-
-def is_allowed(user_id: int) -> bool:
-    if not ALLOWED_USERS:
-        return True
-    return user_id in ALLOWED_USERS
-
+# ── /start ─────────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    if not is_allowed(user_id):
-        await update.message.reply_text("⛔ You are not authorized to use this bot.")
-        return ConversationHandler.END
+    context.user_data.clear()
+    uid = update.effective_user.id
+    presets = get_presets(context, uid)
+    bgs = get_bg_images(context, uid)
 
-    photos = get_user_photos(context, user_id)
-    settings = get_user_settings(context, user_id)
-
+    keyboard = [
+        [InlineKeyboardButton("📸 Process a Photo", callback_data="go_process")],
+        [InlineKeyboardButton("🖼️ My Backgrounds",  callback_data="go_backgrounds"),
+         InlineKeyboardButton("⚙️ My Presets",      callback_data="go_presets")],
+    ]
     await update.message.reply_text(
         "✨ *AI Background Studio*\n\n"
-        f"📸 Photos in library: *{len(photos)}/{MAX_PHOTOS}*\n"
-        f"⚙️ Style: _{settings['prompt'][:40]}..._\n"
-        f"🔢 Versions per photo: *{settings['versions']}*\n"
-        f"✂️ Remove background: *{'Yes' if settings['remove_bg'] else 'No'}*\n\n"
-        "Choose an action:",
+        f"🖼️ Saved backgrounds: *{len(bgs)}/{MAX_BG_IMAGES}*\n"
+        f"⚙️ Saved presets: *{len(presets)}/{MAX_PRESETS}*\n\n"
+        "What would you like to do?",
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    return MAIN_MENU
+    return WAITING_PHOTO
 
 
-async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    uid = query.from_user.id
+    presets = get_presets(context, uid)
+    bgs = get_bg_images(context, uid)
 
-    if query.data == "menu_upload":
-        photos = get_user_photos(context, user_id)
-        remaining = MAX_PHOTOS - len(photos)
+    if query.data == "go_process":
         await query.edit_message_text(
-            f"📸 *Upload Photos*\n\n"
-            f"Library: *{len(photos)}/{MAX_PHOTOS}* photos\n"
-            f"You can upload *{remaining}* more.\n\n"
-            "Send your photos now (one by one or as an album).\n"
-            "When done, send /done to return to the menu.\n\n"
-            "_Send /clear to clear your entire library._",
+            "📸 *Send me the photo you want to process!*",
             parse_mode="Markdown",
         )
-        return UPLOADING_PHOTOS
+        return WAITING_PHOTO
 
-    elif query.data == "menu_generate":
-        photos = get_user_photos(context, user_id)
-        if not photos:
-            await query.edit_message_text(
-                "❌ *No photos in library!*\n\n"
-                "Please upload photos first.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📸 Upload Photos", callback_data="menu_upload"),
-                ]]),
-            )
-            return MAIN_MENU
+    elif query.data == "go_backgrounds":
+        return await show_backgrounds_menu(query, context, uid)
 
-        settings = get_user_settings(context, user_id)
-        total = len(photos) * settings["versions"]
-        await query.edit_message_text(
-            f"⚡ *Starting batch generation!*\n\n"
-            f"📸 Photos: *{len(photos)}*\n"
-            f"🔢 Versions each: *{settings['versions']}*\n"
-            f"🎯 Total to generate: *{total}*\n\n"
-            f"🎨 Style: _{settings['prompt'][:50]}_\n\n"
-            "⏳ This will take a while. I'll send photos as they complete!",
-            parse_mode="Markdown",
-        )
-        # Run generation in background
-        asyncio.create_task(run_batch_generation(query.message, context, user_id))
-        return MAIN_MENU
+    elif query.data == "go_presets":
+        return await show_presets_menu(query, context, uid)
 
-    elif query.data == "menu_settings":
-        settings = get_user_settings(context, user_id)
-        await query.edit_message_text(
-            f"⚙️ *Current Settings*\n\n"
-            f"🎨 Style: _{settings['prompt'][:50]}_\n"
-            f"📐 Aspect: *{settings['aspect']}*\n"
-            f"📍 Placement: *{PLACEMENTS[settings['placement']]}*\n"
-            f"📏 Scale: *{settings['scale'].capitalize()}*\n"
-            f"✨ Filter: *{FILTERS[settings['filter']]}*\n"
-            f"🔢 Versions: *{settings['versions']}*\n"
-            f"✂️ Remove BG: *{'Yes' if settings['remove_bg'] else 'No'}*\n\n"
-            "What would you like to change?",
-            parse_mode="Markdown",
-            reply_markup=settings_keyboard(),
-        )
-        return IN_SETTINGS
-
-    elif query.data == "menu_back":
-        photos = get_user_photos(context, user_id)
-        settings = get_user_settings(context, user_id)
+    elif query.data == "back_home":
+        keyboard = [
+            [InlineKeyboardButton("📸 Process a Photo", callback_data="go_process")],
+            [InlineKeyboardButton("🖼️ My Backgrounds",  callback_data="go_backgrounds"),
+             InlineKeyboardButton("⚙️ My Presets",      callback_data="go_presets")],
+        ]
         await query.edit_message_text(
             "✨ *AI Background Studio*\n\n"
-            f"📸 Photos in library: *{len(photos)}/{MAX_PHOTOS}*\n"
-            f"⚙️ Style: _{settings['prompt'][:40]}..._\n"
-            f"🔢 Versions per photo: *{settings['versions']}*\n"
-            f"✂️ Remove background: *{'Yes' if settings['remove_bg'] else 'No'}*\n\n"
-            "Choose an action:",
+            f"🖼️ Saved backgrounds: *{len(bgs)}/{MAX_BG_IMAGES}*\n"
+            f"⚙️ Saved presets: *{len(presets)}/{MAX_PRESETS}*\n\n"
+            "What would you like to do?",
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        return MAIN_MENU
+        return WAITING_PHOTO
 
-    return MAIN_MENU
+    return WAITING_PHOTO
 
 
-# ── Upload Photos ──────────────────────────────────────────────────────────────
+# ── Photo Received ─────────────────────────────────────────────────────────────
 
-async def photo_upload_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    photos = get_user_photos(context, user_id)
+async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = await update.message.reply_text("📥 Got your photo!")
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    image_bytes = bytes(await file.download_as_bytearray())
+    context.user_data["subject_bytes"] = image_bytes
+    await msg.delete()
 
-    if len(photos) >= MAX_PHOTOS:
-        await update.message.reply_text(
-            f"❌ Library is full ({MAX_PHOTOS} photos max).\n"
-            "Send /clear to clear it first."
-        )
-        return UPLOADING_PHOTOS
+    uid = update.effective_user.id
+    bgs = get_bg_images(context, uid)
 
-    # Save highest resolution file_id
-    file_id = update.message.photo[-1].file_id
-    photos.append(file_id)
-    context.bot_data[f"photos_{user_id}"] = photos
+    # Choose background type
+    keyboard = [
+        [InlineKeyboardButton("🤖 Generate AI Background", callback_data="bg_ai")],
+    ]
+    if bgs:
+        keyboard.append([InlineKeyboardButton(
+            f"🖼️ Use My Saved Backgrounds ({len(bgs)})", callback_data="bg_saved"
+        )])
 
     await update.message.reply_text(
-        f"✅ Photo saved! Library: *{len(photos)}/{MAX_PHOTOS}*\n"
-        "_Keep sending photos, or /done when finished._",
+        "🎨 *What background do you want?*\n\n"
+        "Choose how to create the background:",
         parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    return UPLOADING_PHOTOS
+    return CHOOSE_BG_TYPE
 
 
-async def upload_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    photos = get_user_photos(context, user_id)
-    await update.message.reply_text(
-        f"✅ *Upload complete!*\n\n"
-        f"📸 *{len(photos)}* photos saved to your library.\n\n"
-        "Choose an action:",
-        parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
-    )
-    return MAIN_MENU
+# ── Background Type Choice ─────────────────────────────────────────────────────
 
-
-async def clear_library(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    context.bot_data[f"photos_{user_id}"] = []
-    await update.message.reply_text(
-        "🗑️ Library cleared!\n\nSend photos to upload, or /done to go back.",
-    )
-    return UPLOADING_PHOTOS
-
-
-# ── Batch Generation ───────────────────────────────────────────────────────────
-
-async def run_batch_generation(message, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Run all photo generations in parallel batches."""
-    photos = get_user_photos(context, user_id)
-    settings = get_user_settings(context, user_id)
-    width, height = ASPECT_RATIOS[settings["aspect"]]
-
-    total = len(photos) * settings["versions"]
-    completed = 0
-    failed = 0
-
-    status_msg = await message.reply_text(
-        f"⏳ Generating... *0/{total}* complete",
-        parse_mode="Markdown",
-    )
-
-    # Build all tasks: (file_id, version_number, seed)
-    tasks = []
-    for file_id in photos:
-        for v in range(settings["versions"]):
-            seed = int(time.time() * 1000 + len(tasks)) % 999999
-            tasks.append((file_id, v + 1, seed))
-
-    # Process in parallel batches
-    semaphore = asyncio.Semaphore(MAX_PARALLEL)
-
-    async def process_one(file_id: str, version: int, seed: int):
-        nonlocal completed, failed
-        async with semaphore:
-            try:
-                # Download photo from Telegram
-                file = await context.bot.get_file(file_id)
-                img_bytes = await file.download_as_bytearray()
-                img_bytes = bytes(img_bytes)
-
-                # Remove background if needed
-                if settings["remove_bg"]:
-                    subject = await asyncio.get_event_loop().run_in_executor(
-                        None, remove_background, img_bytes
-                    )
-                else:
-                    subject = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
-
-                # Generate background
-                bg = await asyncio.get_event_loop().run_in_executor(
-                    None, generate_background,
-                    settings["prompt"], width, height, seed
-                )
-
-                # Composite
-                final = await asyncio.get_event_loop().run_in_executor(
-                    None, composite, subject, bg,
-                    settings["placement"], SCALES[settings["scale"]], settings["filter"]
-                )
-
-                # Send result
-                caption = f"✅ Photo {photos.index(file_id)+1} · Version {version}"
-                await message.reply_photo(photo=final, caption=caption)
-                completed += 1
-
-            except Exception as e:
-                logger.error(f"Error processing photo: {e}")
-                failed += 1
-                completed += 1
-
-            # Update status every 3 completions
-            if completed % 3 == 0 or completed == total:
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ Generating... *{completed}/{total}* complete"
-                        + (f"\n⚠️ {failed} failed" if failed else ""),
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    pass
-
-    # Run all tasks
-    await asyncio.gather(*[process_one(fid, v, s) for fid, v, s in tasks])
-
-    # Final summary
-    await status_msg.edit_text(
-        f"✅ *Generation complete!*\n\n"
-        f"📸 *{completed - failed}/{total}* photos generated successfully"
-        + (f"\n⚠️ {failed} failed" if failed else "") +
-        "\n\nSend /start to go back to the menu.",
-        parse_mode="Markdown",
-    )
-
-
-# ── Settings Handlers ──────────────────────────────────────────────────────────
-
-async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def bg_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    settings = get_user_settings(context, user_id)
 
-    if query.data == "set_prompt":
+    if query.data == "bg_ai":
+        context.user_data["bg_type"] = "ai"
         await query.edit_message_text(
-            "🎨 *Background Style*\n\n"
-            f"Current: _{settings['prompt']}_\n\n"
-            "Type a new background description:\n\n"
+            "🤖 *AI Background*\n\n"
+            "Describe the background you want:\n\n"
             "Examples:\n"
             "• `luxury penthouse rooftop at sunset`\n"
             "• `magical forest with glowing lights`\n"
             "• `futuristic cyberpunk city at night`\n"
             "• `professional studio with soft bokeh`\n"
-            "• `tropical beach with turquoise water`",
+            "• `tropical beach with turquoise water`\n\n"
+            "_Type your description:_",
             parse_mode="Markdown",
         )
-        context.user_data["editing"] = "prompt"
-        return SETTINGS_PROMPT
+        return WAITING_AI_PROMPT
 
-    elif query.data == "set_aspect":
-        keyboard = [[InlineKeyboardButton(r, callback_data=f"aspect_{r}")] for r in ASPECT_RATIOS]
-        keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_settings")])
-        await query.edit_message_text(
-            f"📐 *Aspect Ratio*\n\nCurrent: *{settings['aspect']}*\n\nChoose:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return SETTINGS_ASPECT
-
-    elif query.data == "set_placement":
-        keyboard = [[InlineKeyboardButton(label, callback_data=f"place_{k}")] for k, label in PLACEMENTS.items()]
-        keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_settings")])
-        await query.edit_message_text(
-            f"📍 *Placement*\n\nCurrent: *{PLACEMENTS[settings['placement']]}*\n\nChoose:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return SETTINGS_PLACEMENT
-
-    elif query.data == "set_scale":
+    elif query.data == "bg_saved":
+        context.user_data["bg_type"] = "saved"
+        uid = query.from_user.id
+        bgs = get_bg_images(context, uid)
         keyboard = [
-            [InlineKeyboardButton("🔹 Small (40%)",  callback_data="scale_small"),
-             InlineKeyboardButton("🔷 Medium (60%)", callback_data="scale_medium")],
-            [InlineKeyboardButton("🔶 Large (80%)",  callback_data="scale_large"),
-             InlineKeyboardButton("🟠 Full (95%)",   callback_data="scale_full")],
-            [InlineKeyboardButton("◀️ Back", callback_data="back_settings")],
+            [InlineKeyboardButton(f"🖼️ Background {i+1}", callback_data=f"pickbg_{i}")]
+            for i in range(len(bgs))
         ]
+        keyboard.append([InlineKeyboardButton("🔀 Random", callback_data="pickbg_random")])
         await query.edit_message_text(
-            f"📏 *Scale*\n\nCurrent: *{settings['scale'].capitalize()}*\n\nChoose:",
+            f"🖼️ *Choose a background* ({len(bgs)} saved)\n\n"
+            "Pick one or use random:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        return SETTINGS_SCALE
+        return CHOOSE_SAVED_BG
 
-    elif query.data == "set_filter":
-        items = list(FILTERS.items())
-        keyboard = [
-            [InlineKeyboardButton(items[i][1], callback_data=f"filter_{items[i][0]}"),
-             InlineKeyboardButton(items[i+1][1], callback_data=f"filter_{items[i+1][0]}")]
-            for i in range(0, len(items) - 1, 2)
-        ]
-        keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_settings")])
-        await query.edit_message_text(
-            f"✨ *Filter*\n\nCurrent: *{FILTERS[settings['filter']]}*\n\nChoose:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return SETTINGS_FILTER
-
-    elif query.data == "set_versions":
-        keyboard = [
-            [InlineKeyboardButton(str(i), callback_data=f"ver_{i}") for i in range(1, 6)],
-            [InlineKeyboardButton(str(i), callback_data=f"ver_{i}") for i in range(6, 11)],
-            [InlineKeyboardButton("◀️ Back", callback_data="back_settings")],
-        ]
-        await query.edit_message_text(
-            f"🔢 *Versions per Photo*\n\nCurrent: *{settings['versions']}*\n\n"
-            "How many unique versions per photo?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return SETTINGS_VERSIONS
-
-    elif query.data == "set_removebg":
-        current = settings["remove_bg"]
-        keyboard = [
-            [InlineKeyboardButton("✅ Yes — remove background", callback_data="rbg_yes"),
-             InlineKeyboardButton("❌ No — keep original",       callback_data="rbg_no")],
-            [InlineKeyboardButton("◀️ Back", callback_data="back_settings")],
-        ]
-        await query.edit_message_text(
-            f"✂️ *Remove Background*\n\nCurrent: *{'Yes' if current else 'No'}*\n\n"
-            "Should the bot remove the background before placing on new one?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return SETTINGS_REMOVE_BG
-
-    elif query.data == "set_export":
-        template = encode_template(settings)
-        await query.edit_message_text(
-            "📤 *Export Settings Template*\n\n"
-            "Share this code with your workers:\n\n"
-            f"`{template}`\n\n"
-            "They can import it using the Import Template option in Settings.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Back to Settings", callback_data="back_settings")
-            ]]),
-        )
-        return IN_SETTINGS
-
-    elif query.data == "set_import":
-        await query.edit_message_text(
-            "📥 *Import Settings Template*\n\n"
-            "Paste the template code you received:\n\n"
-            "_It starts with_ `TMPL-`",
-            parse_mode="Markdown",
-        )
-        context.user_data["editing"] = "import"
-        return IMPORT_TEMPLATE
-
-    elif query.data == "back_settings":
-        await query.edit_message_text(
-            f"⚙️ *Current Settings*\n\n"
-            f"🎨 Style: _{settings['prompt'][:50]}_\n"
-            f"📐 Aspect: *{settings['aspect']}*\n"
-            f"📍 Placement: *{PLACEMENTS[settings['placement']]}*\n"
-            f"📏 Scale: *{settings['scale'].capitalize()}*\n"
-            f"✨ Filter: *{FILTERS[settings['filter']]}*\n"
-            f"🔢 Versions: *{settings['versions']}*\n"
-            f"✂️ Remove BG: *{'Yes' if settings['remove_bg'] else 'No'}*\n\n"
-            "What would you like to change?",
-            parse_mode="Markdown",
-            reply_markup=settings_keyboard(),
-        )
-        return IN_SETTINGS
-
-    return IN_SETTINGS
+    return CHOOSE_BG_TYPE
 
 
-async def settings_value_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle aspect/placement/scale/filter/versions/removebg inline selections."""
+async def ai_prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if len(prompt) < 3:
+        await update.message.reply_text("Please be more descriptive.")
+        return WAITING_AI_PROMPT
+    context.user_data["ai_prompt"] = prompt
+    return await ask_preset_or_manual(update.message, context)
+
+
+async def saved_bg_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    settings = get_user_settings(context, user_id)
-    data = query.data
+    uid = query.from_user.id
+    bgs = get_bg_images(context, uid)
 
-    if data.startswith("aspect_"):
-        settings["aspect"] = data.replace("aspect_", "")
-    elif data.startswith("place_"):
-        settings["placement"] = data.replace("place_", "")
-    elif data.startswith("scale_"):
-        settings["scale"] = data.replace("scale_", "")
-    elif data.startswith("filter_"):
-        settings["filter"] = data.replace("filter_", "")
-    elif data.startswith("ver_"):
-        settings["versions"] = int(data.replace("ver_", ""))
-    elif data == "rbg_yes":
-        settings["remove_bg"] = True
-    elif data == "rbg_no":
-        settings["remove_bg"] = False
-
-    save_user_settings(context, user_id, settings)
+    if query.data == "pickbg_random":
+        import random
+        context.user_data["saved_bg_index"] = random.randint(0, len(bgs) - 1)
+    else:
+        idx = int(query.data.replace("pickbg_", ""))
+        context.user_data["saved_bg_index"] = idx
 
     await query.edit_message_text(
-        f"✅ *Setting saved!*\n\n"
-        f"⚙️ *Current Settings*\n\n"
-        f"🎨 Style: _{settings['prompt'][:50]}_\n"
-        f"📐 Aspect: *{settings['aspect']}*\n"
-        f"📍 Placement: *{PLACEMENTS[settings['placement']]}*\n"
-        f"📏 Scale: *{settings['scale'].capitalize()}*\n"
-        f"✨ Filter: *{FILTERS[settings['filter']]}*\n"
-        f"🔢 Versions: *{settings['versions']}*\n"
-        f"✂️ Remove BG: *{'Yes' if settings['remove_bg'] else 'No'}*",
-        parse_mode="Markdown",
-        reply_markup=settings_keyboard(),
+        f"✅ Background selected!\n\nNow configuring settings…"
     )
-    return IN_SETTINGS
+    return await ask_preset_or_manual(query.message, context)
 
 
-async def settings_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle text input for prompt and template import."""
-    user_id = update.effective_user.id
-    editing = context.user_data.get("editing")
-    text = update.message.text.strip()
+# ── Preset or Manual Settings ──────────────────────────────────────────────────
 
-    if editing == "prompt":
-        if len(text) < 3:
-            await update.message.reply_text("Please enter a longer description.")
-            return SETTINGS_PROMPT
-        settings = get_user_settings(context, user_id)
-        settings["prompt"] = text
-        save_user_settings(context, user_id, settings)
-        await update.message.reply_text(
-            f"✅ *Background style saved!*\n\n_{text}_",
+async def ask_preset_or_manual(msg, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = msg.chat.id
+    presets = get_presets(context, uid)
+
+    keyboard = [[InlineKeyboardButton("🔧 Configure Manually", callback_data="use_manual")]]
+
+    if presets:
+        for name in list(presets.keys())[:5]:
+            keyboard.insert(0, [InlineKeyboardButton(f"⚡ {name}", callback_data=f"usepreset_{name}")])
+
+    keyboard.append([InlineKeyboardButton("📥 Import Preset Code", callback_data="import_preset")])
+
+    await msg.reply_text(
+        "⚙️ *Settings*\n\n"
+        + ("Choose a saved preset or configure manually:" if presets else "Configure your settings:"),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_PRESET_OR_MANUAL
+
+
+async def preset_or_manual_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if query.data == "use_manual":
+        context.user_data["settings"] = dict(DEFAULT_SETTINGS)
+        return await ask_remove_bg(query, context)
+
+    elif query.data == "import_preset":
+        await query.edit_message_text(
+            "📥 *Import Preset*\n\nPaste your preset code (starts with `PRESET-`):",
             parse_mode="Markdown",
-            reply_markup=settings_keyboard(),
         )
-        context.user_data.pop("editing", None)
-        return IN_SETTINGS
+        return IMPORT_PRESET
 
-    return IN_SETTINGS
+    elif query.data.startswith("usepreset_"):
+        name = query.data.replace("usepreset_", "")
+        presets = get_presets(context, uid)
+        if name in presets:
+            context.user_data["settings"] = dict(presets[name])
+            await query.edit_message_text(
+                f"✅ *Preset '{name}' applied!*\n\n"
+                + settings_summary(context.user_data["settings"]),
+                parse_mode="Markdown",
+            )
+            return await confirm_and_generate(query, context)
+
+    return CHOOSING_PRESET_OR_MANUAL
 
 
-async def import_template_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    settings = decode_template(text)
-
+async def import_preset_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip()
+    settings = decode_preset(code)
     if not settings:
         await update.message.reply_text(
-            "❌ Invalid template code. Please check and try again.\n"
-            "_It should start with_ `TMPL-`",
+            "❌ Invalid preset code. Try again or send /start to restart."
+        )
+        return IMPORT_PRESET
+
+    context.user_data["settings"] = settings
+    await update.message.reply_text(
+        f"✅ *Preset imported!*\n\n" + settings_summary(settings),
+        parse_mode="Markdown",
+    )
+    return await confirm_and_generate_msg(update.message, context)
+
+
+# ── Manual Settings Steps ──────────────────────────────────────────────────────
+
+async def ask_remove_bg(query, context):
+    s = context.user_data["settings"]
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, remove it", callback_data="rbg_yes"),
+         InlineKeyboardButton("❌ No, keep it",     callback_data="rbg_no")],
+    ]
+    await query.edit_message_text(
+        f"✂️ *Remove Background?*\n\nCurrent: *{'Yes' if s['remove_bg'] else 'No'}*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_REMOVE_BG
+
+
+async def remove_bg_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["settings"]["remove_bg"] = query.data == "rbg_yes"
+    keyboard = [[InlineKeyboardButton(r, callback_data=f"aspect_{r}") for r in ASPECT_RATIOS]]
+    await query.edit_message_text(
+        "📐 *Aspect Ratio*\n\nChoose the output size:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_ASPECT
+
+
+async def aspect_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["settings"]["aspect"] = query.data.replace("aspect_", "")
+    keyboard = [[InlineKeyboardButton(label, callback_data=f"place_{k}")] for k, label in PLACEMENTS.items()]
+    await query.edit_message_text(
+        "📍 *Placement*\n\nWhere should your photo sit?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_PLACEMENT
+
+
+async def placement_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["settings"]["placement"] = query.data.replace("place_", "")
+    keyboard = [
+        [InlineKeyboardButton("🔹 Small (40%)",  callback_data="scale_small"),
+         InlineKeyboardButton("🔷 Medium (60%)", callback_data="scale_medium")],
+        [InlineKeyboardButton("🔶 Large (80%)",  callback_data="scale_large"),
+         InlineKeyboardButton("🟠 Full (95%)",   callback_data="scale_full")],
+    ]
+    await query.edit_message_text(
+        "📏 *Scale*\n\nHow large should your photo be?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_SCALE
+
+
+async def scale_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["settings"]["scale"] = query.data.replace("scale_", "")
+    items = list(FILTERS.items())
+    keyboard = [
+        [InlineKeyboardButton(items[i][1], callback_data=f"filter_{items[i][0]}"),
+         InlineKeyboardButton(items[i+1][1], callback_data=f"filter_{items[i+1][0]}")]
+        for i in range(0, len(items) - 1, 2)
+    ]
+    await query.edit_message_text(
+        "✨ *Filter*\n\nChoose a filter for the background:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_FILTER
+
+
+async def filter_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["settings"]["filter"] = query.data.replace("filter_", "")
+    s = context.user_data["settings"]
+
+    # Show summary + option to save as preset
+    bg_type = context.user_data.get("bg_type", "ai")
+    prompt_line = f"🤖 AI: _{context.user_data.get('ai_prompt', '')}_ \n" if bg_type == "ai" else "🖼️ Saved background\n"
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Generate!", callback_data="confirm_yes")],
+        [InlineKeyboardButton("💾 Save as Preset & Generate", callback_data="save_and_generate")],
+        [InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no")],
+    ]
+    await query.edit_message_text(
+        f"🚀 *Ready!*\n\n"
+        f"{prompt_line}"
+        + settings_summary(s),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return RESULT_ACTIONS
+
+
+# ── Confirm & Generate ─────────────────────────────────────────────────────────
+
+async def confirm_and_generate(query, context):
+    s = context.user_data["settings"]
+    bg_type = context.user_data.get("bg_type", "ai")
+    prompt_line = f"🤖 AI: _{context.user_data.get('ai_prompt', '')}_\n" if bg_type == "ai" else "🖼️ Saved background\n"
+    keyboard = [
+        [InlineKeyboardButton("✅ Generate!", callback_data="confirm_yes")],
+        [InlineKeyboardButton("💾 Save as Preset & Generate", callback_data="save_and_generate")],
+        [InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no")],
+    ]
+    await query.edit_message_text(
+        f"🚀 *Ready!*\n\n"
+        f"{prompt_line}"
+        + settings_summary(s),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return RESULT_ACTIONS
+
+
+async def confirm_and_generate_msg(msg, context):
+    s = context.user_data["settings"]
+    keyboard = [
+        [InlineKeyboardButton("✅ Generate!", callback_data="confirm_yes")],
+        [InlineKeyboardButton("💾 Save as Preset & Generate", callback_data="save_and_generate")],
+        [InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no")],
+    ]
+    await msg.reply_text(
+        f"🚀 *Ready!*\n\n" + settings_summary(s),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return RESULT_ACTIONS
+
+
+async def result_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "confirm_no":
+        await query.edit_message_text("🔄 Send /start to begin again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    elif query.data == "save_and_generate":
+        await query.edit_message_text(
+            "💾 *Save Preset*\n\nType a name for this preset:",
             parse_mode="Markdown",
         )
-        return IMPORT_TEMPLATE
+        return SAVE_PRESET_NAME
 
-    save_user_settings(context, user_id, settings)
-    await update.message.reply_text(
-        f"✅ *Template imported successfully!*\n\n"
-        f"🎨 Style: _{settings['prompt'][:50]}_\n"
-        f"📐 Aspect: *{settings['aspect']}*\n"
-        f"📍 Placement: *{PLACEMENTS[settings['placement']]}*\n"
-        f"📏 Scale: *{settings['scale'].capitalize()}*\n"
-        f"✨ Filter: *{FILTERS[settings['filter']]}*\n"
-        f"🔢 Versions: *{settings['versions']}*\n"
-        f"✂️ Remove BG: *{'Yes' if settings['remove_bg'] else 'No'}*",
+    elif query.data in ("confirm_yes", "generate_again"):
+        await query.edit_message_text("⏳ *Working on it…*", parse_mode="Markdown")
+        await do_generate(query.message, context, query.from_user.id)
+        return RESULT_ACTIONS
+
+    return RESULT_ACTIONS
+
+
+async def save_preset_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    name = update.message.text.strip()[:30]
+    presets = get_presets(context, uid)
+
+    if len(presets) >= MAX_PRESETS:
+        await update.message.reply_text(
+            f"❌ Max {MAX_PRESETS} presets reached. Delete one first via My Presets."
+        )
+        return SAVE_PRESET_NAME
+
+    presets[name] = dict(context.user_data["settings"])
+    save_presets(context, uid, presets)
+
+    await update.message.reply_text(f"✅ Preset *'{name}'* saved!", parse_mode="Markdown")
+    await do_generate_msg(update.message, context, uid)
+    return RESULT_ACTIONS
+
+
+# ── Core Generation ────────────────────────────────────────────────────────────
+
+async def do_generate(msg, context, uid):
+    """Generate and send the composited photo."""
+    d = context.user_data
+    s = d["settings"]
+    width, height = ASPECT_RATIOS[s["aspect"]]
+
+    try:
+        # Step 1: Subject
+        subject_bytes = d["subject_bytes"]
+        if s["remove_bg"]:
+            await msg.reply_text("✂️ Removing background…")
+            subject = do_remove_bg(subject_bytes)
+        else:
+            subject = Image.open(io.BytesIO(subject_bytes)).convert("RGBA")
+
+        # Step 2: Background
+        bg_type = d.get("bg_type", "ai")
+        if bg_type == "ai":
+            await msg.reply_text("🤖 Generating AI background…")
+            prompt = d.get("ai_prompt", "professional studio background")
+            background = generate_ai_background(prompt, width, height)
+        else:
+            await msg.reply_text("🖼️ Loading your background…")
+            idx = d.get("saved_bg_index", 0)
+            bgs = get_bg_images(context, uid)
+            file = await msg._bot.get_file(bgs[idx])
+            bg_bytes = bytes(await file.download_as_bytearray())
+            background = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+            background = background.resize((width, height), Image.LANCZOS)
+
+        # Step 3: Composite
+        final = composite_image(
+            subject, background,
+            s["placement"], SCALES[s["scale"]], s["filter"]
+        )
+
+        # Step 4: Send with action buttons
+        caption = (
+            f"✅ *Done!*\n\n"
+            f"{'🤖 ' + d.get('ai_prompt','')[:40] if bg_type == 'ai' else '🖼️ Custom background'}\n"
+            f"{settings_summary(s)}"
+        )
+        keyboard = [
+            [InlineKeyboardButton("⚡ Generate Again (new BG)", callback_data="generate_again")],
+            [InlineKeyboardButton("🏠 Back to Menu", callback_data="back_home")],
+        ]
+        await msg.reply_photo(
+            photo=final,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"Generation error: {e}")
+        await msg.reply_text(
+            f"❌ Something went wrong: `{str(e)[:200]}`\n\nSend /start to try again.",
+            parse_mode="Markdown",
+        )
+
+
+async def do_generate_msg(msg, context, uid):
+    """Same as do_generate but called from message context."""
+    await do_generate(msg, context, uid)
+
+
+# ── Backgrounds Management ─────────────────────────────────────────────────────
+
+async def show_backgrounds_menu(query, context, uid):
+    bgs = get_bg_images(context, uid)
+    keyboard = [
+        [InlineKeyboardButton("➕ Upload New Background", callback_data="bg_upload")],
+        [InlineKeyboardButton("🗑️ Clear All Backgrounds", callback_data="bg_clear")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back_home")],
+    ]
+    await query.edit_message_text(
+        f"🖼️ *My Backgrounds*\n\n"
+        f"Saved: *{len(bgs)}/{MAX_BG_IMAGES}*\n\n"
+        "Upload images to use as backgrounds instead of AI generation.",
         parse_mode="Markdown",
-        reply_markup=settings_keyboard(),
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    return IN_SETTINGS
+    return MANAGE_BACKGROUNDS
 
+
+async def backgrounds_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if query.data == "bg_upload":
+        bgs = get_bg_images(context, uid)
+        await query.edit_message_text(
+            f"📤 *Upload Backgrounds*\n\n"
+            f"Current: {len(bgs)}/{MAX_BG_IMAGES}\n\n"
+            "Send your background images now.\n"
+            "When done, send /done",
+        )
+        return UPLOADING_BACKGROUNDS
+
+    elif query.data == "bg_clear":
+        save_bg_images(context, uid, [])
+        await query.edit_message_text("🗑️ All backgrounds cleared!")
+        keyboard = [[InlineKeyboardButton("◀️ Back to Menu", callback_data="back_home")]]
+        await query.edit_message_text(
+            "🗑️ All backgrounds cleared!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return MANAGE_BACKGROUNDS
+
+    elif query.data == "back_home":
+        return await start_callback(update, context)
+
+    return MANAGE_BACKGROUNDS
+
+
+async def bg_upload_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    bgs = get_bg_images(context, uid)
+    if len(bgs) >= MAX_BG_IMAGES:
+        await update.message.reply_text(f"❌ Max {MAX_BG_IMAGES} backgrounds reached.")
+        return UPLOADING_BACKGROUNDS
+    file_id = update.message.photo[-1].file_id
+    bgs.append(file_id)
+    save_bg_images(context, uid, bgs)
+    await update.message.reply_text(
+        f"✅ Background {len(bgs)} saved! Send more or /done to finish.",
+    )
+    return UPLOADING_BACKGROUNDS
+
+
+async def bg_upload_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    bgs = get_bg_images(context, uid)
+    keyboard = [[InlineKeyboardButton("🏠 Back to Menu", callback_data="back_home")]]
+    await update.message.reply_text(
+        f"✅ *{len(bgs)} background(s) saved!*\n\nSend /start to go back.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return MANAGE_BACKGROUNDS
+
+
+# ── Presets Management ─────────────────────────────────────────────────────────
+
+async def show_presets_menu(query, context, uid):
+    presets = get_presets(context, uid)
+    keyboard = []
+    for name in presets:
+        keyboard.append([
+            InlineKeyboardButton(f"📤 Export '{name}'", callback_data=f"exportpreset_{name}"),
+            InlineKeyboardButton(f"🗑️ Delete",          callback_data=f"delpreset_{name}"),
+        ])
+    keyboard.append([InlineKeyboardButton("📥 Import Preset", callback_data="importpreset_menu")])
+    keyboard.append([InlineKeyboardButton("◀️ Back",          callback_data="back_home")])
+
+    await query.edit_message_text(
+        f"⚙️ *My Presets* ({len(presets)}/{MAX_PRESETS})\n\n"
+        + ("No presets yet. Configure settings and save as preset when processing a photo." if not presets else ""),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return MANAGE_PRESETS
+
+
+async def presets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    presets = get_presets(context, uid)
+
+    if query.data.startswith("exportpreset_"):
+        name = query.data.replace("exportpreset_", "")
+        if name in presets:
+            code = encode_preset(presets[name])
+            await query.edit_message_text(
+                f"📤 *Export Preset: '{name}'*\n\n"
+                f"Share this code:\n\n`{code}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ Back", callback_data="back_presets")
+                ]]),
+            )
+        return MANAGE_PRESETS
+
+    elif query.data.startswith("delpreset_"):
+        name = query.data.replace("delpreset_", "")
+        if name in presets:
+            del presets[name]
+            save_presets(context, uid, presets)
+        return await show_presets_menu(query, context, uid)
+
+    elif query.data == "importpreset_menu":
+        await query.edit_message_text(
+            "📥 *Import Preset*\n\nPaste your preset code:",
+            parse_mode="Markdown",
+        )
+        context.user_data["importing_from_menu"] = True
+        return IMPORT_PRESET
+
+    elif query.data == "back_presets":
+        return await show_presets_menu(query, context, uid)
+
+    elif query.data == "back_home":
+        return await start_callback(update, context)
+
+    return MANAGE_PRESETS
+
+
+async def import_preset_menu_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    code = update.message.text.strip()
+    settings = decode_preset(code)
+
+    if not settings:
+        await update.message.reply_text("❌ Invalid code. Try again or /start to cancel.")
+        return IMPORT_PRESET
+
+    # If importing from menu, ask for a name to save it
+    await update.message.reply_text(
+        f"✅ Valid preset! Type a name to save it:",
+        parse_mode="Markdown",
+    )
+    context.user_data["importing_settings"] = settings
+    return SAVE_PRESET_NAME
+
+
+# ── Cancel ─────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "Send /start to open the menu.",
-    )
+    context.user_data.clear()
+    await update.message.reply_text("Send /start to begin again.")
     return ConversationHandler.END
 
 
@@ -774,47 +916,57 @@ def main() -> None:
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            MAIN_MENU: [
-                CallbackQueryHandler(main_menu_callback, pattern="^menu_"),
+            WAITING_PHOTO: [
+                MessageHandler(filters.PHOTO, photo_received),
+                CallbackQueryHandler(start_callback, pattern="^(go_|back_home)"),
             ],
-            UPLOADING_PHOTOS: [
-                MessageHandler(filters.PHOTO, photo_upload_received),
-                CommandHandler("done", upload_done),
-                CommandHandler("clear", clear_library),
+            CHOOSE_BG_TYPE: [
+                CallbackQueryHandler(bg_type_chosen, pattern="^bg_(ai|saved)$"),
             ],
-            IN_SETTINGS: [
-                CallbackQueryHandler(settings_callback,       pattern="^set_|^back_settings"),
-                CallbackQueryHandler(main_menu_callback,      pattern="^menu_back"),
+            WAITING_AI_PROMPT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ai_prompt_received),
             ],
-            SETTINGS_PROMPT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, settings_text_input),
+            CHOOSE_SAVED_BG: [
+                CallbackQueryHandler(saved_bg_chosen, pattern="^pickbg_"),
             ],
-            SETTINGS_ASPECT: [
-                CallbackQueryHandler(settings_value_callback, pattern="^aspect_"),
-                CallbackQueryHandler(settings_callback,       pattern="^back_settings"),
+            CHOOSING_PRESET_OR_MANUAL: [
+                CallbackQueryHandler(preset_or_manual_chosen, pattern="^(use_manual|usepreset_|import_preset)"),
             ],
-            SETTINGS_PLACEMENT: [
-                CallbackQueryHandler(settings_value_callback, pattern="^place_"),
-                CallbackQueryHandler(settings_callback,       pattern="^back_settings"),
+            CHOOSING_REMOVE_BG: [
+                CallbackQueryHandler(remove_bg_chosen, pattern="^rbg_"),
             ],
-            SETTINGS_SCALE: [
-                CallbackQueryHandler(settings_value_callback, pattern="^scale_"),
-                CallbackQueryHandler(settings_callback,       pattern="^back_settings"),
+            CHOOSING_ASPECT: [
+                CallbackQueryHandler(aspect_chosen, pattern="^aspect_"),
             ],
-            SETTINGS_FILTER: [
-                CallbackQueryHandler(settings_value_callback, pattern="^filter_"),
-                CallbackQueryHandler(settings_callback,       pattern="^back_settings"),
+            CHOOSING_PLACEMENT: [
+                CallbackQueryHandler(placement_chosen, pattern="^place_"),
             ],
-            SETTINGS_VERSIONS: [
-                CallbackQueryHandler(settings_value_callback, pattern="^ver_"),
-                CallbackQueryHandler(settings_callback,       pattern="^back_settings"),
+            CHOOSING_SCALE: [
+                CallbackQueryHandler(scale_chosen, pattern="^scale_"),
             ],
-            SETTINGS_REMOVE_BG: [
-                CallbackQueryHandler(settings_value_callback, pattern="^rbg_"),
-                CallbackQueryHandler(settings_callback,       pattern="^back_settings"),
+            CHOOSING_FILTER: [
+                CallbackQueryHandler(filter_chosen, pattern="^filter_"),
             ],
-            IMPORT_TEMPLATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, import_template_input),
+            RESULT_ACTIONS: [
+                CallbackQueryHandler(result_action, pattern="^(confirm_yes|confirm_no|save_and_generate|generate_again)"),
+                CallbackQueryHandler(start_callback, pattern="^back_home"),
+            ],
+            SAVE_PRESET_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_preset_name_received),
+            ],
+            MANAGE_BACKGROUNDS: [
+                CallbackQueryHandler(backgrounds_callback, pattern="^bg_"),
+                CallbackQueryHandler(start_callback, pattern="^back_home"),
+            ],
+            UPLOADING_BACKGROUNDS: [
+                MessageHandler(filters.PHOTO, bg_upload_received),
+                CommandHandler("done", bg_upload_done),
+            ],
+            MANAGE_PRESETS: [
+                CallbackQueryHandler(presets_callback, pattern="^(exportpreset_|delpreset_|importpreset_menu|back_presets|back_home)"),
+            ],
+            IMPORT_PRESET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, import_preset_menu_received),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -825,7 +977,7 @@ def main() -> None:
     )
 
     app.add_handler(conv)
-    logger.info("🚀 AI Background Studio Bot (Batch Edition) is running…")
+    logger.info("🚀 AI Background Studio (Enhanced) is running…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

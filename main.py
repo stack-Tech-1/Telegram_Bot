@@ -49,7 +49,7 @@ if not HF_API_TOKEN:
 
 # Hugging Face model via new router endpoint
 HF_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}/v1/text-to-image"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

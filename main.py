@@ -18,6 +18,7 @@ import logging
 import hashlib
 import urllib.parse
 import requests
+import asyncio
 from PIL import Image, ImageFilter, ImageEnhance
 from rembg import remove
 from dotenv import load_dotenv
@@ -325,7 +326,7 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── Photo Received (album-aware) ───────────────────────────────────────────────
 
-async def _flush_album(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def  _flush_album_direct(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fired by job_queue after the collection window; proceeds with gathered photos."""
     job = context.job
     chat_id = job.chat_id
@@ -374,26 +375,29 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     album_key = f"album_{uid}"
 
     if media_group_id:
-        # ── Album: collect photos and (re)schedule the flush job ──
         if album_key not in context.bot_data:
             context.bot_data[album_key] = {
                 "bytes_list": [],
                 "media_group_id": media_group_id,
+                "task": None,
             }
         context.bot_data[album_key]["bytes_list"].append(image_bytes)
 
-        # Cancel existing flush job and reschedule to extend the window
-        for j in context.job_queue.get_jobs_by_name(f"flush_{uid}"):
-            j.schedule_removal()
+        # Cancel existing task and reschedule
+        existing_task = context.bot_data[album_key].get("task")
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
 
-        context.job_queue.run_once(
-            _flush_album,
-            when=ALBUM_COLLECT_SECS,
-            chat_id=update.effective_chat.id,
-            user_id=uid,
-            name=f"flush_{uid}",
-        )
-        return WAITING_PHOTO  # stay in state while collecting
+        async def delayed_flush():
+            await asyncio.sleep(ALBUM_COLLECT_SECS)
+            await _flush_album_direct(
+                context,
+                uid,
+                update.effective_chat.id,
+            )
+
+        context.bot_data[album_key]["task"] = asyncio.create_task(delayed_flush())
+        return WAITING_PHOTO
 
     else:
         # ── Single photo: store as one-item list and proceed immediately ──

@@ -1051,7 +1051,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    persistence = PicklePersistence(filepath="bot_persistence.pkl")
+    persistence = PicklePersistence(filepath="/data/bot_persistence.pkl")
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     conv = ConversationHandler(
@@ -1060,6 +1060,7 @@ def main() -> None:
             WAITING_PHOTO: [
                 MessageHandler(filters.PHOTO, photo_received),
                 CallbackQueryHandler(start_callback, pattern="^(go_|back_home)"),
+                CallbackQueryHandler(bg_type_chosen, pattern="^bg_(ai|saved)$"),  # handles album flush buttons
             ],
             CHOOSE_BG_TYPE: [
                 CallbackQueryHandler(bg_type_chosen, pattern="^bg_(ai|saved)$"),

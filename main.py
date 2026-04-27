@@ -735,6 +735,15 @@ async def result_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return SAVE_PRESET_NAME
 
     elif query.data in ("confirm_yes", "generate_again"):
+        # Advance the background cycle on Generate Again
+        if query.data == "generate_again" and context.user_data.get("bg_type") == "saved":
+            uid = query.from_user.id
+            bgs = get_bg_images(context, uid)
+            if bgs:
+                n_photos = len(context.user_data.get("subject_bytes_list", []))
+                current_start = context.user_data.get("saved_bg_start_index", 0)
+                context.user_data["saved_bg_start_index"] = (current_start + n_photos) % len(bgs)
+
         n = len(context.user_data.get("subject_bytes_list", [None]))
         status = f"⏳ *Generating {n} photo{'s' if n > 1 else ''}… please wait.*"
         try:

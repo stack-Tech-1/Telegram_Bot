@@ -2,12 +2,15 @@
 ✨ AI Background Studio Bot — Enhanced Edition
 ================================================
 Features:
+  - Admin / Worker role system
+  - Admins configure global preset, backgrounds, and AI settings
+  - Workers just send photos and get results instantly
   - Generate AI backgrounds (Pollinations.AI - free, no token needed)
-  - Use your own uploaded background images
+  - Use saved background images
   - Save & reuse settings presets
-  - Export/import presets to share with workers
-  - One-tap "Generate Again" for instant new versions
-  - Batch photo processing (send multiple photos at once as an album)
+  - Export/import presets
+  - One-tap "Generate Again"
+  - Batch photo processing (album support)
 """
 
 import os
@@ -41,9 +44,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
 if not BOT_TOKEN:
     raise SystemExit("❌ BOT_TOKEN is missing! Set it in Railway Variables.")
 
-MAX_BG_IMAGES      = 20   # max saved background images per user
-MAX_PRESETS        = 10   # max saved presets per user
-ALBUM_COLLECT_SECS = 2    # seconds to wait for album photos to arrive
+# Comma-separated Telegram user IDs, e.g. ADMIN_IDS=123456789,987654321
+_raw_admin_ids = os.getenv("ADMIN_IDS", "").strip()
+ADMIN_IDS = set(
+    int(x.strip()) for x in _raw_admin_ids.split(",") if x.strip().isdigit()
+)
+if not ADMIN_IDS:
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning("⚠️ No ADMIN_IDS set! Add ADMIN_IDS to Railway Variables.")
+
+MAX_BG_IMAGES      = 20
+MAX_PRESETS        = 10
+ALBUM_COLLECT_SECS = 2
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -53,7 +65,9 @@ logger = logging.getLogger(__name__)
 
 # ── Conversation States ────────────────────────────────────────────────────────
 (
+    # Shared
     WAITING_PHOTO,
+    # Admin-only
     CHOOSE_BG_TYPE,
     WAITING_AI_PROMPT,
     CHOOSE_SAVED_BG,
@@ -69,7 +83,14 @@ logger = logging.getLogger(__name__)
     UPLOADING_BACKGROUNDS,
     IMPORT_PRESET,
     RESULT_ACTIONS,
-) = range(16)
+    # Admin global settings
+    GLOBAL_SETTINGS,
+    GLOBAL_AI_PROMPT,
+    GLOBAL_ACTIVE_PRESET,
+    # Worker
+    WORKER_WAITING_PHOTO,
+    WORKER_RESULT,
+) = range(21)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 FILTERS = {
@@ -115,7 +136,53 @@ DEFAULT_SETTINGS = {
 }
 
 
-# ── User Data Helpers ──────────────────────────────────────────────────────────
+# ── Role Helpers ───────────────────────────────────────────────────────────────
+
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
+
+# ── Global State Helpers (stored in bot_data) ──────────────────────────────────
+
+def get_global_preset(ctx) -> dict | None:
+    return ctx.bot_data.get("global_preset")
+
+def set_global_preset(ctx, preset: dict):
+    ctx.bot_data["global_preset"] = preset
+
+def get_global_bg_mode(ctx) -> str:
+    """Returns 'saved' or 'ai'"""
+    return ctx.bot_data.get("global_bg_mode", "saved")
+
+def set_global_bg_mode(ctx, mode: str):
+    ctx.bot_data["global_bg_mode"] = mode
+
+def get_global_ai_prompt(ctx) -> str:
+    return ctx.bot_data.get("global_ai_prompt", "professional studio background")
+
+def set_global_ai_prompt(ctx, prompt: str):
+    ctx.bot_data["global_ai_prompt"] = prompt
+
+def get_global_backgrounds(ctx) -> list:
+    return ctx.bot_data.get("global_backgrounds", [])
+
+def set_global_backgrounds(ctx, bgs: list):
+    ctx.bot_data["global_backgrounds"] = bgs
+
+def is_globally_configured(ctx) -> bool:
+    """True if admin has set both a preset and at least one background or an AI prompt."""
+    preset = get_global_preset(ctx)
+    if not preset:
+        return False
+    mode = get_global_bg_mode(ctx)
+    if mode == "saved" and not get_global_backgrounds(ctx):
+        return False
+    if mode == "ai" and not get_global_ai_prompt(ctx):
+        return False
+    return True
+
+
+# ── Per-Admin Data Helpers ─────────────────────────────────────────────────────
 
 def get_bg_images(ctx, uid):
     return ctx.bot_data.setdefault(f"bg_{uid}", [])
@@ -252,36 +319,69 @@ def settings_summary(s: dict) -> str:
     )
 
 
-# ── /start ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# /start — routes to admin or worker menu
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     uid = update.effective_user.id
+
+    if is_admin(uid):
+        return await show_admin_home(update.message, context, edit=False)
+    else:
+        return await show_worker_home(update.message, context, edit=False)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADMIN SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def show_admin_home(msg_or_query, context, edit=False):
+    uid = msg_or_query.from_user.id if hasattr(msg_or_query, 'from_user') else msg_or_query.chat.id
     presets = get_presets(context, uid)
     bgs = get_bg_images(context, uid)
+    global_preset = get_global_preset(context)
+    configured = is_globally_configured(context)
+
+    status = "✅ Configured" if configured else "⚠️ Not configured yet"
+    active = f"*{list(get_presets(context, uid).keys())[0]}*" if global_preset else "None"
 
     keyboard = [
-        [InlineKeyboardButton("📸 Process Photos", callback_data="go_process")],
+        [InlineKeyboardButton("📸 Process My Photos", callback_data="admin_process")],
+        [InlineKeyboardButton("🌍 Global Worker Settings", callback_data="admin_global")],
         [InlineKeyboardButton("🖼️ My Backgrounds", callback_data="go_backgrounds"),
          InlineKeyboardButton("⚙️ My Presets",     callback_data="go_presets")],
     ]
-    await update.message.reply_text(
-        "✨ *AI Background Studio*\n\n"
+    text = (
+        "👑 *AI Background Studio — Admin Panel*\n\n"
+        f"🌍 Worker config: *{status}*\n"
         f"🖼️ Saved backgrounds: *{len(bgs)}/{MAX_BG_IMAGES}*\n"
         f"⚙️ Saved presets: *{len(presets)}/{MAX_PRESETS}*\n\n"
-        "What would you like to do?",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "What would you like to do?"
     )
+
+    if edit:
+        try:
+            await msg_or_query.edit_message_caption(text, parse_mode="Markdown",
+                                                    reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            await msg_or_query.edit_message_text(text, parse_mode="Markdown",
+                                                 reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await msg_or_query.reply_text(text, parse_mode="Markdown",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
     return WAITING_PHOTO
 
 
-async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def admin_home_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-    presets = get_presets(context, uid)
-    bgs = get_bg_images(context, uid)
+
+    if not is_admin(uid):
+        await query.answer("⛔ Not authorized.", show_alert=True)
+        return WAITING_PHOTO
 
     async def safe_edit(text, reply_markup=None):
         kwargs = {"parse_mode": "Markdown"}
@@ -292,7 +392,7 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             await query.edit_message_text(text, **kwargs)
 
-    if query.data == "go_process":
+    if query.data == "admin_process":
         await safe_edit(
             "📸 *Send me your photo(s) to process!*\n\n"
             "_You can send a single photo or an album of multiple photos at once._"
@@ -305,28 +405,192 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "go_presets":
         return await show_presets_menu(query, context, uid)
 
+    elif query.data == "admin_global":
+        return await show_global_settings(query, context)
+
     elif query.data == "back_home":
-        keyboard = [
-            [InlineKeyboardButton("📸 Process Photos", callback_data="go_process")],
-            [InlineKeyboardButton("🖼️ My Backgrounds", callback_data="go_backgrounds"),
-             InlineKeyboardButton("⚙️ My Presets",     callback_data="go_presets")],
-        ]
-        await safe_edit(
-            "✨ *AI Background Studio*\n\n"
-            f"🖼️ Saved backgrounds: *{len(bgs)}/{MAX_BG_IMAGES}*\n"
-            f"⚙️ Saved presets: *{len(presets)}/{MAX_PRESETS}*\n\n"
-            "What would you like to do?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return WAITING_PHOTO
+        return await show_admin_home(query, context, edit=True)
 
     return WAITING_PHOTO
 
 
-# ── Photo Received (album-aware) ───────────────────────────────────────────────
+# ── Global Worker Settings ─────────────────────────────────────────────────────
+
+async def show_global_settings(query, context) -> int:
+    preset = get_global_preset(context)
+    bg_mode = get_global_bg_mode(context)
+    bgs = get_global_backgrounds(context)
+    ai_prompt = get_global_ai_prompt(context)
+    configured = is_globally_configured(context)
+
+    preset_label = "⚠️ Not set" if not preset else "✅ Set"
+    bg_label = f"🖼️ {len(bgs)} saved image(s)" if bg_mode == "saved" else f"🤖 AI: {ai_prompt[:30]}"
+    status = "✅ Workers can use the bot" if configured else "⚠️ Workers cannot use the bot yet"
+
+    keyboard = [
+        [InlineKeyboardButton("⚙️ Set Active Preset", callback_data="global_set_preset")],
+        [InlineKeyboardButton("🖼️ Set Worker Backgrounds", callback_data="global_set_backgrounds")],
+        [InlineKeyboardButton(
+            f"{'🤖 Switch to AI Mode' if bg_mode == 'saved' else '🖼️ Switch to Saved BG Mode'}",
+            callback_data="global_toggle_bg_mode"
+        )],
+        [InlineKeyboardButton("◀️ Back", callback_data="back_home")],
+    ]
+
+    if bg_mode == "ai":
+        keyboard.insert(2, [InlineKeyboardButton("✏️ Set AI Prompt", callback_data="global_set_ai_prompt")])
+
+    text = (
+        "🌍 *Global Worker Settings*\n\n"
+        f"📋 Active preset: *{preset_label}*\n"
+        f"🎨 Background mode: *{'Saved Images' if bg_mode == 'saved' else 'AI Generated'}*\n"
+        f"🖼️ Background: *{bg_label}*\n\n"
+        f"{status}"
+    )
+
+    try:
+        await query.edit_message_caption(text, parse_mode="Markdown",
+                                         reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        await query.edit_message_text(text, parse_mode="Markdown",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
+    return GLOBAL_SETTINGS
+
+
+async def global_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if not is_admin(uid):
+        await query.answer("⛔ Not authorized.", show_alert=True)
+        return GLOBAL_SETTINGS
+
+    if query.data == "global_set_preset":
+        presets = get_presets(context, uid)
+        if not presets:
+            await query.answer("⚠️ No presets saved yet. Create one first via My Presets.", show_alert=True)
+            return GLOBAL_SETTINGS
+
+        keyboard = [
+            [InlineKeyboardButton(f"⚡ {name}", callback_data=f"global_activate_{name}")]
+            for name in presets
+        ]
+        keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_global")])
+        try:
+            await query.edit_message_caption(
+                "⚙️ *Choose which preset workers will use:*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            await query.edit_message_text(
+                "⚙️ *Choose which preset workers will use:*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        return GLOBAL_ACTIVE_PRESET
+
+    elif query.data == "global_toggle_bg_mode":
+        current = get_global_bg_mode(context)
+        new_mode = "ai" if current == "saved" else "saved"
+        set_global_bg_mode(context, new_mode)
+        await query.answer(f"Switched to {'AI' if new_mode == 'ai' else 'Saved Images'} mode!")
+        return await show_global_settings(query, context)
+
+    elif query.data == "global_set_ai_prompt":
+        try:
+            await query.edit_message_caption(
+                "🤖 *Set AI Background Prompt*\n\n"
+                "Type the prompt workers' photos will use for AI backgrounds:\n\n"
+                "Example: `luxury penthouse rooftop at sunset`",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await query.edit_message_text(
+                "🤖 *Set AI Background Prompt*\n\n"
+                "Type the prompt workers' photos will use for AI backgrounds:\n\n"
+                "Example: `luxury penthouse rooftop at sunset`",
+                parse_mode="Markdown",
+            )
+        return GLOBAL_AI_PROMPT
+
+    elif query.data == "global_set_backgrounds":
+        bgs = get_global_backgrounds(context)
+        try:
+            await query.edit_message_caption(
+                f"🖼️ *Set Worker Backgrounds*\n\n"
+                f"Current: *{len(bgs)}* background(s) saved for workers.\n\n"
+                "Send background images now — they will replace the current worker backgrounds.\n"
+                "When done, send /done",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await query.edit_message_text(
+                f"🖼️ *Set Worker Backgrounds*\n\n"
+                f"Current: *{len(bgs)}* background(s) saved for workers.\n\n"
+                "Send background images now — they will replace the current worker backgrounds.\n"
+                "When done, send /done",
+                parse_mode="Markdown",
+            )
+        context.user_data["uploading_global_bgs"] = True
+        context.user_data["new_global_bgs"] = []
+        return UPLOADING_BACKGROUNDS
+
+    elif query.data == "back_global":
+        return await show_global_settings(query, context)
+
+    elif query.data == "back_home":
+        return await show_admin_home(query, context, edit=True)
+
+    return GLOBAL_SETTINGS
+
+
+async def global_active_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if query.data == "back_global":
+        return await show_global_settings(query, context)
+
+    if query.data.startswith("global_activate_"):
+        name = query.data.replace("global_activate_", "")
+        presets = get_presets(context, uid)
+        if name in presets:
+            set_global_preset(context, dict(presets[name]))
+            await query.answer(f"✅ '{name}' is now the active worker preset!", show_alert=True)
+        return await show_global_settings(query, context)
+
+    return GLOBAL_ACTIVE_PRESET
+
+
+async def global_ai_prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    prompt = update.message.text.strip()
+    if len(prompt) < 3:
+        await update.message.reply_text("Please be more descriptive.")
+        return GLOBAL_AI_PROMPT
+
+    set_global_ai_prompt(context, prompt)
+    await update.message.reply_text(
+        f"✅ AI prompt set to:\n_\"{prompt}\"_\n\nWorkers will now get AI backgrounds with this prompt.",
+        parse_mode="Markdown",
+    )
+    # Show global settings again via a new message
+    keyboard = [[InlineKeyboardButton("◀️ Back to Global Settings", callback_data="admin_global")]]
+    await update.message.reply_text(
+        "Use the button below to go back.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return GLOBAL_SETTINGS
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHOTO RECEIVED — shared between admin and worker
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def _flush_album(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fired by job_queue after the collection window; proceeds with gathered photos."""
+    """Fired by job_queue after collection window; proceeds with gathered photos."""
     job = context.job
     chat_id = job.chat_id
     uid = job.user_id
@@ -338,35 +602,54 @@ async def _flush_album(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     subject_bytes_list = album_data["bytes_list"]
     n = len(subject_bytes_list)
-
-    # Store in user_data so the conversation flow can access it
     context.application.user_data[uid]["subject_bytes_list"] = subject_bytes_list
 
-    bgs = get_bg_images(context, uid)
-    keyboard = [
-        [InlineKeyboardButton("🤖 Generate AI Backgrounds", callback_data="bg_ai")],
-    ]
-    if bgs:
-        keyboard.append([InlineKeyboardButton(
-            f"🖼️ Use My Saved Backgrounds ({len(bgs)})", callback_data="bg_saved"
-        )])
+    if is_admin(uid):
+        # Admin: show background type choice
+        bgs = get_bg_images(context, uid)
+        keyboard = [
+            [InlineKeyboardButton("🤖 Generate AI Backgrounds", callback_data="bg_ai")],
+        ]
+        if bgs:
+            keyboard.append([InlineKeyboardButton(
+                f"🖼️ Use My Saved Backgrounds ({len(bgs)})", callback_data="bg_saved"
+            )])
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📥 Got *{n} photo{'s' if n > 1 else ''}*!\n\n"
+                "🎨 *What background do you want?*\n"
+                "Choose how to create the backgrounds:"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        # Worker: show simple generate button
+        if not is_globally_configured(context):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏳ *Bot not configured yet.* Contact your admin.",
+                parse_mode="Markdown",
+            )
+            return
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"📥 Got *{n} photo{'s' if n > 1 else ''}*!\n\n"
-            "🎨 *What background do you want?*\n"
-            "Choose how to create the backgrounds:"
-        ),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+        keyboard = [[InlineKeyboardButton(
+            f"⚡ Generate {n} photo{'s' if n > 1 else ''}",
+            callback_data="worker_generate"
+        )]]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📥 Got *{n} photo{'s' if n > 1 else ''}*! Ready to process.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
 
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
     photo = update.message.photo[-1]
-    media_group_id = update.message.media_group_id  # None if single photo
+    media_group_id = update.message.media_group_id
 
     file = await photo.get_file()
     image_bytes = bytes(await file.download_as_bytearray())
@@ -374,15 +657,10 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     album_key = f"album_{uid}"
 
     if media_group_id:
-        # ── Album: collect photos and (re)schedule the flush job ──
         if album_key not in context.bot_data:
-            context.bot_data[album_key] = {
-                "bytes_list": [],
-                "media_group_id": media_group_id,
-            }
+            context.bot_data[album_key] = {"bytes_list": [], "media_group_id": media_group_id}
         context.bot_data[album_key]["bytes_list"].append(image_bytes)
 
-        # Cancel existing flush job and reschedule to extend the window
         for j in context.job_queue.get_jobs_by_name(f"flush_{uid}"):
             j.schedule_removal()
 
@@ -393,39 +671,250 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id=uid,
             name=f"flush_{uid}",
         )
-        return WAITING_PHOTO  # stay in state while collecting
+        return WAITING_PHOTO
 
     else:
-        # ── Single photo: store as one-item list and proceed immediately ──
         context.user_data["subject_bytes_list"] = [image_bytes]
 
-        bgs = get_bg_images(context, uid)
-        keyboard = [
-            [InlineKeyboardButton("🤖 Generate AI Background", callback_data="bg_ai")],
-        ]
-        if bgs:
-            keyboard.append([InlineKeyboardButton(
-                f"🖼️ Use My Saved Backgrounds ({len(bgs)})", callback_data="bg_saved"
-            )])
+        if is_admin(uid):
+            bgs = get_bg_images(context, uid)
+            keyboard = [
+                [InlineKeyboardButton("🤖 Generate AI Background", callback_data="bg_ai")],
+            ]
+            if bgs:
+                keyboard.append([InlineKeyboardButton(
+                    f"🖼️ Use My Saved Backgrounds ({len(bgs)})", callback_data="bg_saved"
+                )])
+            await update.message.reply_text(
+                "📥 Got *1 photo*!\n\n🎨 *What background do you want?*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return CHOOSE_BG_TYPE
+        else:
+            if not is_globally_configured(context):
+                await update.message.reply_text(
+                    "⏳ *Bot not configured yet.* Contact your admin.",
+                    parse_mode="Markdown",
+                )
+                return WAITING_PHOTO
 
-        await update.message.reply_text(
-            "📥 Got *1 photo*!\n\n"
-            "🎨 *What background do you want?*\n"
-            "Choose how to create the background:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            keyboard = [[InlineKeyboardButton("⚡ Generate", callback_data="worker_generate")]]
+            await update.message.reply_text(
+                "📥 Got *1 photo*! Ready to process.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return WORKER_WAITING_PHOTO
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKER SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def show_worker_home(msg_or_query, context, edit=False):
+    configured = is_globally_configured(context)
+
+    if configured:
+        preset = get_global_preset(context)
+        bg_mode = get_global_bg_mode(context)
+        bgs = get_global_backgrounds(context)
+        bg_info = f"{len(bgs)} background(s)" if bg_mode == "saved" else "AI generated"
+        keyboard = [[InlineKeyboardButton("📸 Send Photos", callback_data="worker_send_photos")]]
+        text = (
+            "✨ *AI Background Studio*\n\n"
+            "Send your photos and get them processed instantly!\n\n"
+            f"🎨 Background: *{bg_info}*\n"
+            f"✂️ Remove BG: *{'Yes' if preset.get('remove_bg') else 'No'}*"
         )
-        return CHOOSE_BG_TYPE
+    else:
+        keyboard = []
+        text = (
+            "✨ *AI Background Studio*\n\n"
+            "⏳ *Bot not configured yet.*\n\n"
+            "Please contact your admin to set up the bot."
+        )
+
+    if edit:
+        try:
+            await msg_or_query.edit_message_caption(
+                text, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+            )
+        except Exception:
+            await msg_or_query.edit_message_text(
+                text, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+            )
+    else:
+        await msg_or_query.reply_text(
+            text, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+        )
+    return WORKER_WAITING_PHOTO
 
 
-# ── Background Type Choice ─────────────────────────────────────────────────────
+async def worker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if query.data == "worker_send_photos":
+        try:
+            await query.edit_message_caption(
+                "📸 *Send me your photo(s)!*\n\n"
+                "_You can send a single photo or an album of multiple photos at once._",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await query.edit_message_text(
+                "📸 *Send me your photo(s)!*\n\n"
+                "_You can send a single photo or an album of multiple photos at once._",
+                parse_mode="Markdown",
+            )
+        return WORKER_WAITING_PHOTO
+
+    elif query.data == "worker_generate":
+        # Pull album data if needed
+        if "subject_bytes_list" not in context.user_data:
+            app_ud = context.application.user_data.get(uid, {})
+            if "subject_bytes_list" in app_ud:
+                context.user_data["subject_bytes_list"] = app_ud.pop("subject_bytes_list")
+
+        n = len(context.user_data.get("subject_bytes_list", [None]))
+        status = f"⏳ *Generating {n} photo{'s' if n > 1 else ''}… please wait.*"
+        try:
+            await query.edit_message_caption(status, parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(status, parse_mode="Markdown")
+
+        await do_worker_generate(query.message, context, uid)
+        return WORKER_RESULT
+
+    elif query.data == "worker_generate_again":
+        n = len(context.user_data.get("subject_bytes_list", [None]))
+        # Advance background cycle
+        bgs = get_global_backgrounds(context)
+        if bgs:
+            n_photos = len(context.user_data.get("subject_bytes_list", []))
+            current = context.user_data.get("worker_bg_start_index", 0)
+            context.user_data["worker_bg_start_index"] = (current + n_photos) % len(bgs)
+
+        status = f"⏳ *Generating {n} photo{'s' if n > 1 else ''}… please wait.*"
+        try:
+            await query.edit_message_caption(status, parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(status, parse_mode="Markdown")
+
+        await do_worker_generate(query.message, context, uid)
+        return WORKER_RESULT
+
+    elif query.data == "worker_back_home":
+        return await show_worker_home(query, context, edit=True)
+
+    return WORKER_WAITING_PHOTO
+
+
+async def do_worker_generate(msg, context, uid):
+    """Generate photos for a worker using global admin settings."""
+    preset = get_global_preset(context)
+    bg_mode = get_global_bg_mode(context)
+    bgs = get_global_backgrounds(context)
+    ai_prompt = get_global_ai_prompt(context)
+    subject_bytes_list = context.user_data.get("subject_bytes_list", [])
+    n = len(subject_bytes_list)
+    s = preset
+    width, height = ASPECT_RATIOS[s["aspect"]]
+    start_idx = context.user_data.get("worker_bg_start_index", 0)
+
+    try:
+        await msg.reply_text(
+            f"⚙️ *Processing {n} photo{'s' if n > 1 else ''}…*",
+            parse_mode="Markdown"
+        )
+
+        results = []
+
+        for i, subject_bytes in enumerate(subject_bytes_list):
+            # Step 1: Subject
+            if s["remove_bg"]:
+                if i == 0:
+                    await msg.reply_text("✂️ Removing backgrounds…")
+                subject = do_remove_bg(subject_bytes)
+            else:
+                subject = Image.open(io.BytesIO(subject_bytes)).convert("RGBA")
+
+            # Step 2: Background
+            if bg_mode == "ai":
+                if i == 0:
+                    await msg.reply_text("🤖 Generating AI backgrounds…")
+                time.sleep(0.15)
+                background = generate_ai_background(ai_prompt, width, height)
+                label = f"🤖 AI background"
+            else:
+                idx = (start_idx + i) % len(bgs)
+                if i == 0:
+                    await msg.reply_text("🖼️ Loading backgrounds…")
+                file = await msg._bot.get_file(bgs[idx])
+                bg_bytes = bytes(await file.download_as_bytearray())
+                background = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+                background = background.resize((width, height), Image.LANCZOS)
+                label = f"🖼️ Background {idx + 1}"
+
+            # Step 3: Composite
+            final = composite_image(
+                subject, background,
+                s["placement"], SCALES[s["scale"]], s["filter"]
+            )
+            results.append((final, label))
+
+        # Step 4: Send
+        keyboard = [
+            [InlineKeyboardButton("⚡ Generate Again (new BGs)", callback_data="worker_generate_again")],
+            [InlineKeyboardButton("🏠 Back to Menu", callback_data="worker_back_home")],
+        ]
+
+        if n == 1:
+            final_bytes, label = results[0]
+            await msg.reply_photo(
+                photo=final_bytes,
+                caption=f"✅ *Done!* {label}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            media_group = []
+            for i, (final_bytes, label) in enumerate(results):
+                cap = f"✅ *Done! {n} photos*" if i == 0 else f"Photo {i+1}/{n} — {label}"
+                media_group.append(InputMediaPhoto(
+                    media=io.BytesIO(final_bytes),
+                    caption=cap,
+                    parse_mode="Markdown" if i == 0 else None,
+                ))
+            await msg.reply_media_group(media=media_group)
+            await msg.reply_text(
+                f"⬆️ Your *{n} photos* are ready above!",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+    except Exception as e:
+        logger.error(f"Worker generation error: {e}")
+        await msg.reply_text(
+            f"❌ Something went wrong: `{str(e)[:200]}`\n\nSend /start to try again.",
+            parse_mode="Markdown",
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADMIN — Background Type Choice (for admin's own processing)
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def bg_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
 
-    # Pull album data into user_data if the flush job wrote it there
     if "subject_bytes_list" not in context.user_data:
         app_ud = context.application.user_data.get(uid, {})
         if "subject_bytes_list" in app_ud:
@@ -481,11 +970,9 @@ async def ai_prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def saved_bg_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-
     idx = int(query.data.replace("pickbg_", ""))
     context.user_data["saved_bg_start_index"] = idx
     n = len(context.user_data.get("subject_bytes_list", [None]))
-
     await query.edit_message_text(
         f"✅ Starting from *Background {idx + 1}*!\n\n"
         f"Your {n} photo{'s' if n > 1 else ''} will cycle through backgrounds from there.\n\n"
@@ -499,15 +986,11 @@ async def saved_bg_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def ask_preset_or_manual(msg, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = msg.chat.id
     presets = get_presets(context, uid)
-
     keyboard = [[InlineKeyboardButton("🔧 Configure Manually", callback_data="use_manual")]]
-
     if presets:
         for name in list(presets.keys())[:5]:
             keyboard.insert(0, [InlineKeyboardButton(f"⚡ {name}", callback_data=f"usepreset_{name}")])
-
     keyboard.append([InlineKeyboardButton("📥 Import Preset Code", callback_data="import_preset")])
-
     await msg.reply_text(
         "⚙️ *Settings*\n\n"
         + ("Choose a saved preset or configure manually:" if presets else "Configure your settings:"),
@@ -556,7 +1039,6 @@ async def import_preset_received(update: Update, context: ContextTypes.DEFAULT_T
             "❌ Invalid preset code. Try again or send /start to restart."
         )
         return IMPORT_PRESET
-
     context.user_data["settings"] = settings
     await update.message.reply_text(
         f"✅ *Preset imported!*\n\n" + settings_summary(settings),
@@ -651,24 +1133,20 @@ async def filter_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     n = len(context.user_data.get("subject_bytes_list", [None]))
     bg_type = context.user_data.get("bg_type", "ai")
     prompt_line = f"🤖 AI: _{context.user_data.get('ai_prompt', '')}_ \n" if bg_type == "ai" else "🖼️ Saved backgrounds (cycling)\n"
-
     keyboard = [
         [InlineKeyboardButton(f"✅ Generate {n} photo{'s' if n > 1 else ''}!", callback_data="confirm_yes")],
         [InlineKeyboardButton("💾 Save as Preset & Generate", callback_data="save_and_generate")],
         [InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no")],
     ]
     await query.edit_message_text(
-        f"🚀 *Ready!*\n\n"
-        f"📸 Photos: *{n}*\n"
-        f"{prompt_line}"
-        + settings_summary(s),
+        f"🚀 *Ready!*\n\n📸 Photos: *{n}*\n{prompt_line}" + settings_summary(s),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return RESULT_ACTIONS
 
 
-# ── Confirm & Generate ─────────────────────────────────────────────────────────
+# ── Confirm & Generate (Admin) ─────────────────────────────────────────────────
 
 async def confirm_and_generate(query, context):
     s = context.user_data["settings"]
@@ -681,10 +1159,7 @@ async def confirm_and_generate(query, context):
         [InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no")],
     ]
     await query.edit_message_text(
-        f"🚀 *Ready!*\n\n"
-        f"📸 Photos: *{n}*\n"
-        f"{prompt_line}"
-        + settings_summary(s),
+        f"🚀 *Ready!*\n\n📸 Photos: *{n}*\n{prompt_line}" + settings_summary(s),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -700,9 +1175,7 @@ async def confirm_and_generate_msg(msg, context):
         [InlineKeyboardButton("🔄 Start Over", callback_data="confirm_no")],
     ]
     await msg.reply_text(
-        f"🚀 *Ready!*\n\n"
-        f"📸 Photos: *{n}*\n"
-        + settings_summary(s),
+        f"🚀 *Ready!*\n\n📸 Photos: *{n}*\n" + settings_summary(s),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -735,7 +1208,6 @@ async def result_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return SAVE_PRESET_NAME
 
     elif query.data in ("confirm_yes", "generate_again"):
-        # Advance the background cycle on Generate Again
         if query.data == "generate_again" and context.user_data.get("bg_type") == "saved":
             uid = query.from_user.id
             bgs = get_bg_images(context, uid)
@@ -770,16 +1242,14 @@ async def save_preset_name_received(update: Update, context: ContextTypes.DEFAUL
 
     presets[name] = dict(context.user_data["settings"])
     save_presets(context, uid, presets)
-
     await update.message.reply_text(f"✅ Preset *'{name}'* saved!", parse_mode="Markdown")
     await do_generate_batch(update.message, context, uid)
     return RESULT_ACTIONS
 
 
-# ── Core Generation (batch) ────────────────────────────────────────────────────
+# ── Core Generation (Admin batch) ──────────────────────────────────────────────
 
 async def do_generate_batch(msg, context, uid):
-    """Generate and send all composited photos — as an album if multiple, single if one."""
     d = context.user_data
     s = d["settings"]
     width, height = ASPECT_RATIOS[s["aspect"]]
@@ -794,12 +1264,9 @@ async def do_generate_batch(msg, context, uid):
             f"⚙️ *Processing {n} photo{'s' if n > 1 else ''}…*",
             parse_mode="Markdown"
         )
-
-        results = []  # list of (final_bytes, label)
+        results = []
 
         for i, subject_bytes in enumerate(subject_bytes_list):
-
-            # Step 1: Remove background
             if s["remove_bg"]:
                 if i == 0:
                     await msg.reply_text("✂️ Removing backgrounds…")
@@ -807,16 +1274,14 @@ async def do_generate_batch(msg, context, uid):
             else:
                 subject = Image.open(io.BytesIO(subject_bytes)).convert("RGBA")
 
-            # Step 2: Background
             if bg_type == "ai":
                 if i == 0:
                     await msg.reply_text("🤖 Generating AI backgrounds…")
                 prompt = d.get("ai_prompt", "professional studio background")
-                time.sleep(0.15)  # ensure each seed is unique
+                time.sleep(0.15)
                 background = generate_ai_background(prompt, width, height)
                 label = f"🤖 {prompt[:35]}"
             else:
-                # Cycle: photo 0 → start_idx, photo 1 → start_idx+1, etc.
                 idx = (start_idx + i) % len(bgs)
                 if i == 0:
                     await msg.reply_text("🖼️ Loading backgrounds…")
@@ -826,14 +1291,12 @@ async def do_generate_batch(msg, context, uid):
                 background = background.resize((width, height), Image.LANCZOS)
                 label = f"🖼️ Background {idx + 1}"
 
-            # Step 3: Composite
             final = composite_image(
                 subject, background,
                 s["placement"], SCALES[s["scale"]], s["filter"]
             )
             results.append((final, label))
 
-        # Step 4: Send results
         keyboard = [
             [InlineKeyboardButton("⚡ Generate Again (new BGs)", callback_data="generate_again")],
             [InlineKeyboardButton("🏠 Back to Menu", callback_data="back_home")],
@@ -841,32 +1304,22 @@ async def do_generate_batch(msg, context, uid):
 
         if n == 1:
             final_bytes, label = results[0]
-            caption = f"✅ *Done!*\n\n{label}\n{settings_summary(s)}"
             await msg.reply_photo(
                 photo=final_bytes,
-                caption=caption,
+                caption=f"✅ *Done!*\n\n{label}\n{settings_summary(s)}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
-            # Build album (Telegram max 10 per group)
             media_group = []
             for i, (final_bytes, label) in enumerate(results):
-                if i == 0:
-                    cap = f"✅ *Done! {n} photos*\n\n{label}\n{settings_summary(s)}"
-                    pm = "Markdown"
-                else:
-                    cap = f"Photo {i+1}/{n} — {label}"
-                    pm = None
+                cap = f"✅ *Done! {n} photos*\n\n{label}\n{settings_summary(s)}" if i == 0 else f"Photo {i+1}/{n} — {label}"
                 media_group.append(InputMediaPhoto(
                     media=io.BytesIO(final_bytes),
                     caption=cap,
-                    parse_mode=pm,
+                    parse_mode="Markdown" if i == 0 else None,
                 ))
-
             await msg.reply_media_group(media=media_group)
-
-            # Buttons go in a separate message (albums don't support inline keyboards)
             await msg.reply_text(
                 f"⬆️ Your *{n} photos* are ready above!",
                 parse_mode="Markdown",
@@ -881,7 +1334,7 @@ async def do_generate_batch(msg, context, uid):
         )
 
 
-# ── Backgrounds Management ─────────────────────────────────────────────────────
+# ── Backgrounds Management (Admin) ─────────────────────────────────────────────
 
 async def show_backgrounds_menu(query, context, uid):
     bgs = get_bg_images(context, uid)
@@ -893,7 +1346,7 @@ async def show_backgrounds_menu(query, context, uid):
     await query.edit_message_text(
         f"🖼️ *My Backgrounds*\n\n"
         f"Saved: *{len(bgs)}/{MAX_BG_IMAGES}*\n\n"
-        "Upload images to use as backgrounds instead of AI generation.",
+        "Upload images to use as backgrounds for your own processing.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -907,11 +1360,11 @@ async def backgrounds_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if query.data == "bg_upload":
         bgs = get_bg_images(context, uid)
+        context.user_data["uploading_global_bgs"] = False
         await query.edit_message_text(
             f"📤 *Upload Backgrounds*\n\n"
             f"Current: {len(bgs)}/{MAX_BG_IMAGES}\n\n"
-            "Send your background images now.\n"
-            "When done, send /done",
+            "Send your background images now.\nWhen done, send /done",
         )
         return UPLOADING_BACKGROUNDS
 
@@ -925,54 +1378,85 @@ async def backgrounds_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return MANAGE_BACKGROUNDS
 
     elif query.data == "back_home":
-        return await start_callback(update, context)
+        return await show_admin_home(query, context, edit=True)
 
     return MANAGE_BACKGROUNDS
 
 
 async def bg_upload_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
-    bgs = get_bg_images(context, uid)
-    if len(bgs) >= MAX_BG_IMAGES:
-        await update.message.reply_text(f"❌ Max {MAX_BG_IMAGES} backgrounds reached.")
-        return UPLOADING_BACKGROUNDS
-    file_id = update.message.photo[-1].file_id
-    bgs.append(file_id)
-    save_bg_images(context, uid, bgs)
-    await update.message.reply_text(
-        f"✅ Background {len(bgs)} saved! Send more or /done to finish.",
-    )
+
+    # Check if uploading global worker backgrounds or personal admin backgrounds
+    if context.user_data.get("uploading_global_bgs"):
+        new_bgs = context.user_data.setdefault("new_global_bgs", [])
+        if len(new_bgs) >= MAX_BG_IMAGES:
+            await update.message.reply_text(f"❌ Max {MAX_BG_IMAGES} backgrounds reached.")
+            return UPLOADING_BACKGROUNDS
+        file_id = update.message.photo[-1].file_id
+        new_bgs.append(file_id)
+        await update.message.reply_text(
+            f"✅ Worker background {len(new_bgs)} saved! Send more or /done to finish."
+        )
+    else:
+        bgs = get_bg_images(context, uid)
+        if len(bgs) >= MAX_BG_IMAGES:
+            await update.message.reply_text(f"❌ Max {MAX_BG_IMAGES} backgrounds reached.")
+            return UPLOADING_BACKGROUNDS
+        file_id = update.message.photo[-1].file_id
+        bgs.append(file_id)
+        save_bg_images(context, uid, bgs)
+        await update.message.reply_text(
+            f"✅ Background {len(bgs)} saved! Send more or /done to finish."
+        )
     return UPLOADING_BACKGROUNDS
 
 
 async def bg_upload_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
-    bgs = get_bg_images(context, uid)
-    keyboard = [[InlineKeyboardButton("🏠 Back to Menu", callback_data="back_home")]]
-    await update.message.reply_text(
-        f"✅ *{len(bgs)} background(s) saved!*\n\nSend /start to go back.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+
+    if context.user_data.get("uploading_global_bgs"):
+        new_bgs = context.user_data.get("new_global_bgs", [])
+        set_global_backgrounds(context, new_bgs)
+        context.user_data.pop("uploading_global_bgs", None)
+        context.user_data.pop("new_global_bgs", None)
+        keyboard = [[InlineKeyboardButton("🌍 Back to Global Settings", callback_data="admin_global")]]
+        await update.message.reply_text(
+            f"✅ *{len(new_bgs)} worker background(s) saved!*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        bgs = get_bg_images(context, uid)
+        keyboard = [[InlineKeyboardButton("🏠 Back to Menu", callback_data="back_home")]]
+        await update.message.reply_text(
+            f"✅ *{len(bgs)} background(s) saved!*\n\nSend /start to go back.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
     return MANAGE_BACKGROUNDS
 
 
-# ── Presets Management ─────────────────────────────────────────────────────────
+# ── Presets Management (Admin) ─────────────────────────────────────────────────
 
 async def show_presets_menu(query, context, uid):
     presets = get_presets(context, uid)
+    global_preset = get_global_preset(context)
     keyboard = []
     for name in presets:
+        is_active = global_preset and presets[name] == global_preset
+        label = f"{'🌍 ' if is_active else ''}{'⚡ ' + name}"
         keyboard.append([
-            InlineKeyboardButton(f"📤 Export '{name}'", callback_data=f"exportpreset_{name}"),
-            InlineKeyboardButton(f"🗑️ Delete",          callback_data=f"delpreset_{name}"),
+            InlineKeyboardButton(label, callback_data=f"global_activate_{name}"),
+            InlineKeyboardButton("📤 Export", callback_data=f"exportpreset_{name}"),
+            InlineKeyboardButton("🗑️ Delete", callback_data=f"delpreset_{name}"),
         ])
     keyboard.append([InlineKeyboardButton("📥 Import Preset", callback_data="importpreset_menu")])
     keyboard.append([InlineKeyboardButton("◀️ Back",          callback_data="back_home")])
 
     await query.edit_message_text(
         f"⚙️ *My Presets* ({len(presets)}/{MAX_PRESETS})\n\n"
-        + ("No presets yet. Configure settings and save as preset when processing a photo." if not presets else ""),
+        "🌍 = currently active for workers\n\n"
+        + ("No presets yet." if not presets else "Tap a preset name to set it as the worker preset."),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -985,13 +1469,19 @@ async def presets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     uid = query.from_user.id
     presets = get_presets(context, uid)
 
-    if query.data.startswith("exportpreset_"):
+    if query.data.startswith("global_activate_") and query.data in [f"global_activate_{n}" for n in presets]:
+        name = query.data.replace("global_activate_", "")
+        if name in presets:
+            set_global_preset(context, dict(presets[name]))
+            await query.answer(f"✅ '{name}' is now the active worker preset!", show_alert=True)
+        return await show_presets_menu(query, context, uid)
+
+    elif query.data.startswith("exportpreset_"):
         name = query.data.replace("exportpreset_", "")
         if name in presets:
             code = encode_preset(presets[name])
             await query.edit_message_text(
-                f"📤 *Export Preset: '{name}'*\n\n"
-                f"Share this code:\n\n`{code}`",
+                f"📤 *Export Preset: '{name}'*\n\n`{code}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀️ Back", callback_data="back_presets")
@@ -1018,7 +1508,7 @@ async def presets_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return await show_presets_menu(query, context, uid)
 
     elif query.data == "back_home":
-        return await start_callback(update, context)
+        return await show_admin_home(query, context, edit=True)
 
     return MANAGE_PRESETS
 
@@ -1027,15 +1517,10 @@ async def import_preset_menu_received(update: Update, context: ContextTypes.DEFA
     uid = update.effective_user.id
     code = update.message.text.strip()
     settings = decode_preset(code)
-
     if not settings:
         await update.message.reply_text("❌ Invalid code. Try again or /start to cancel.")
         return IMPORT_PRESET
-
-    await update.message.reply_text(
-        "✅ Valid preset! Type a name to save it:",
-        parse_mode="Markdown",
-    )
+    await update.message.reply_text("✅ Valid preset! Type a name to save it:", parse_mode="Markdown")
     context.user_data["importing_settings"] = settings
     return SAVE_PRESET_NAME
 
@@ -1048,7 +1533,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
     persistence = PicklePersistence(filepath="/data/bot_persistence.pkl")
@@ -1057,11 +1544,14 @@ def main() -> None:
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
+            # ── Shared ──
             WAITING_PHOTO: [
                 MessageHandler(filters.PHOTO, photo_received),
-                CallbackQueryHandler(start_callback, pattern="^(go_|back_home)"),
-                CallbackQueryHandler(bg_type_chosen, pattern="^bg_(ai|saved)$"),  # handles album flush buttons
+                CallbackQueryHandler(admin_home_callback, pattern="^(admin_process|admin_global|go_backgrounds|go_presets|back_home)$"),
+                CallbackQueryHandler(bg_type_chosen, pattern="^bg_(ai|saved)$"),
+                CallbackQueryHandler(worker_callback, pattern="^(worker_send_photos|worker_generate|worker_generate_again|worker_back_home)$"),
             ],
+            # ── Admin ──
             CHOOSE_BG_TYPE: [
                 CallbackQueryHandler(bg_type_chosen, pattern="^bg_(ai|saved)$"),
             ],
@@ -1090,25 +1580,44 @@ def main() -> None:
                 CallbackQueryHandler(filter_chosen, pattern="^filter_"),
             ],
             RESULT_ACTIONS: [
-                CallbackQueryHandler(result_action, pattern="^(confirm_yes|confirm_no|save_and_generate|generate_again)"),
-                CallbackQueryHandler(start_callback, pattern="^back_home"),
+                CallbackQueryHandler(result_action, pattern="^(confirm_yes|confirm_no|save_and_generate|generate_again)$"),
+                CallbackQueryHandler(admin_home_callback, pattern="^back_home$"),
             ],
             SAVE_PRESET_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, save_preset_name_received),
             ],
             MANAGE_BACKGROUNDS: [
                 CallbackQueryHandler(backgrounds_callback, pattern="^bg_"),
-                CallbackQueryHandler(start_callback, pattern="^back_home"),
+                CallbackQueryHandler(admin_home_callback, pattern="^back_home$"),
             ],
             UPLOADING_BACKGROUNDS: [
                 MessageHandler(filters.PHOTO, bg_upload_received),
                 CommandHandler("done", bg_upload_done),
             ],
             MANAGE_PRESETS: [
-                CallbackQueryHandler(presets_callback, pattern="^(exportpreset_|delpreset_|importpreset_menu|back_presets|back_home)"),
+                CallbackQueryHandler(presets_callback, pattern="^(global_activate_|exportpreset_|delpreset_|importpreset_menu|back_presets|back_home)"),
             ],
             IMPORT_PRESET: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, import_preset_menu_received),
+            ],
+            # ── Admin Global Settings ──
+            GLOBAL_SETTINGS: [
+                CallbackQueryHandler(global_settings_callback, pattern="^(global_set_preset|global_toggle_bg_mode|global_set_ai_prompt|global_set_backgrounds|back_global|back_home|admin_global)$"),
+            ],
+            GLOBAL_AI_PROMPT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, global_ai_prompt_received),
+                CallbackQueryHandler(global_settings_callback, pattern="^admin_global$"),
+            ],
+            GLOBAL_ACTIVE_PRESET: [
+                CallbackQueryHandler(global_active_preset_callback, pattern="^(global_activate_|back_global)"),
+            ],
+            # ── Worker ──
+            WORKER_WAITING_PHOTO: [
+                MessageHandler(filters.PHOTO, photo_received),
+                CallbackQueryHandler(worker_callback, pattern="^(worker_send_photos|worker_generate|worker_generate_again|worker_back_home)$"),
+            ],
+            WORKER_RESULT: [
+                CallbackQueryHandler(worker_callback, pattern="^(worker_generate_again|worker_back_home)$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

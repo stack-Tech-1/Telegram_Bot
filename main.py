@@ -18,12 +18,21 @@ import math
 import random
 import logging
 import hashlib
+import asyncio
 import urllib.parse
 import requests
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
-from rembg import remove
 from dotenv import load_dotenv
+
+# ── Ensure /data directory exists (Railway volume) ─────────────────────────────
+os.makedirs("/data", exist_ok=True)
+os.makedirs("/data/u2net_models", exist_ok=True)
+
+# Cache rembg model to /data so it persists across Railway deploys
+os.environ.setdefault("U2NET_HOME", "/data/u2net_models")
+
+from rembg import remove
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
@@ -88,7 +97,7 @@ DEFAULT_SETTINGS = {
     "blur_bg":       0,
     "blur_fg":       0,
     "overlay":       "none",
-    "remove_bg":     True,
+    "remove_bg":     False,
 }
 
 FILTER_LABELS = {
@@ -594,37 +603,43 @@ async def handle_get_photos(query, context, uid) -> int:
     return MAIN_MENU
 
 
+async def _process_single_batch(bot, photo_file_ids: list, s: dict, gen_idx: int) -> list:
+    """Download photos and process one full batch. Runs concurrently with other batches."""
+    batch_results = []
+    for photo_idx, file_id in enumerate(photo_file_ids):
+        file = await bot.get_file(file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+        # Offset seed by gen_idx so each batch gets a different background
+        result_bytes = await asyncio.to_thread(
+            composite_single,
+            subject_bytes=image_bytes,
+            settings=s,
+            gen_index=gen_idx * 100 + photo_idx + int(time.time() * 10) % 1000,
+        )
+        batch_results.append(result_bytes)
+    return batch_results
+
+
 async def do_generate(msg, context, uid, photo_file_ids: list, s: dict):
-    """Run all generations and send results as batches."""
+    """Run all generations concurrently and send results as batches."""
     n_gens = s["generations"]
     n_photos = len(photo_file_ids)
 
     try:
-        for gen_idx in range(n_gens):
-            await msg.reply_text(
-                f"🔄 *Batch {gen_idx + 1}/{n_gens}*",
-                parse_mode="Markdown",
-            )
+        await msg.reply_text(
+            f"⚙️ *Starting {n_gens} batch{'es' if n_gens > 1 else ''} concurrently…*",
+            parse_mode="Markdown",
+        )
 
-            batch_results = []
+        # Run all batches at the same time
+        tasks = [
+            _process_single_batch(msg._bot, photo_file_ids, s, gen_idx)
+            for gen_idx in range(n_gens)
+        ]
+        all_results = await asyncio.gather(*tasks)
 
-            for photo_idx, file_id in enumerate(photo_file_ids):
-                # Download photo from Telegram
-                file = await msg._bot.get_file(file_id)
-                image_bytes = bytes(await file.download_as_bytearray())
-
-                # Process
-                result_bytes = composite_single(
-                    subject_bytes=image_bytes,
-                    settings=s,
-                    gen_index=gen_idx * 100 + photo_idx,
-                )
-                batch_results.append(result_bytes)
-
-                # Small delay to ensure unique seeds
-                time.sleep(0.2)
-
-            # Send batch
+        # Send results in order
+        for gen_idx, batch_results in enumerate(all_results):
             if n_photos == 1:
                 await msg.reply_photo(
                     photo=batch_results[0],
@@ -640,7 +655,7 @@ async def do_generate(msg, context, uid, photo_file_ids: list, s: dict):
                 ]
                 await msg.reply_media_group(media=media_group)
 
-        # Done — return to main menu
+        # Done
         await msg.reply_text(
             f"✅ *Done! {n_gens} batch{'es' if n_gens > 1 else ''} generated.*",
             parse_mode="Markdown",
@@ -1196,6 +1211,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # Ensure /data directories exist (Railway volume)
+    os.makedirs("/data", exist_ok=True)
+    os.makedirs("/data/u2net_models", exist_ok=True)
     persistence = PicklePersistence(filepath="/data/bot_persistence.pkl")
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 

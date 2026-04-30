@@ -21,6 +21,7 @@ import hashlib
 import asyncio
 import urllib.parse
 import requests
+import fal_client
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
 from dotenv import load_dotenv
@@ -204,27 +205,24 @@ BG_SIZE = (1024, 1024)
 
 def generate_ai_background(prompt: str) -> Image.Image:
     full = prompt + ", high quality, photorealistic, scenic, no people, no text"
-    encoded = urllib.parse.quote(full)
     seed = int(time.time() * 1000) % 999999
-    url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1024&height=1024&nologo=true&enhance=true&seed={seed}"
+    logger.info(f"Generating background via fal.ai seed={seed}")
+
+    result = fal_client.run(
+        "fal-ai/flux/schnell",
+        arguments={
+            "prompt": full,
+            "image_size": "square_hd",
+            "num_inference_steps": 4,
+            "num_images": 1,
+            "seed": seed,
+        },
     )
-    logger.info(f"Generating background seed={seed}")
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        resp = requests.get(url, timeout=120)
-        if resp.status_code == 429:
-            wait = 2 ** attempt  # 1s, 2s, 4s, 8s, 16s
-            logger.warning(f"Rate limited (429), retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        return img.resize(BG_SIZE, Image.LANCZOS)
-
-    raise RuntimeError("Pollinations.ai rate limit exceeded after retries. Please wait a moment and try again.")
+    image_url = result["images"][0]["url"]
+    resp = requests.get(image_url, timeout=30)
+    resp.raise_for_status()
+    img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    return img.resize(BG_SIZE, Image.LANCZOS)
 
 
 def remove_background(image_bytes: bytes) -> Image.Image:

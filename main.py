@@ -211,10 +211,20 @@ def generate_ai_background(prompt: str) -> Image.Image:
         f"?width=1024&height=1024&nologo=true&enhance=true&seed={seed}"
     )
     logger.info(f"Generating background seed={seed}")
-    resp = requests.get(url, timeout=120)
-    resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-    return img.resize(BG_SIZE, Image.LANCZOS)
+
+    max_retries = 5
+    for attempt in range(max_retries):
+        resp = requests.get(url, timeout=120)
+        if resp.status_code == 429:
+            wait = 2 ** attempt  # 1s, 2s, 4s, 8s, 16s
+            logger.warning(f"Rate limited (429), retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        return img.resize(BG_SIZE, Image.LANCZOS)
+
+    raise RuntimeError("Pollinations.ai rate limit exceeded after retries. Please wait a moment and try again.")
 
 
 def remove_background(image_bytes: bytes) -> Image.Image:
@@ -627,16 +637,18 @@ async def do_generate(msg, context, uid, photo_file_ids: list, s: dict):
 
     try:
         await msg.reply_text(
-            f"⚙️ *Starting {n_gens} batch{'es' if n_gens > 1 else ''} concurrently…*",
+            f"⚙️ *Generating {n_gens} batch{'es' if n_gens > 1 else ''}…*",
             parse_mode="Markdown",
         )
 
-        # Run all batches at the same time
+        # Run batches sequentially to avoid hitting Pollinations.ai rate limits
         tasks = [
             _process_single_batch(msg._bot, photo_file_ids, s, gen_idx)
             for gen_idx in range(n_gens)
         ]
-        all_results = await asyncio.gather(*tasks)
+        all_results = []
+        for task in tasks:
+            all_results.append(await task)
 
         # Send results in order
         for gen_idx, batch_results in enumerate(all_results):

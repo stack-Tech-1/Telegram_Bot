@@ -26,6 +26,8 @@ import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
 from dotenv import load_dotenv
 
+load_dotenv()
+
 # ── Ensure /data directory exists (Railway volume) ─────────────────────────────
 os.makedirs("/data", exist_ok=True)
 os.makedirs("/data/u2net_models", exist_ok=True)
@@ -47,12 +49,15 @@ from telegram.ext import (
     ContextTypes,
 )
 
-load_dotenv()
-
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
 if not BOT_TOKEN:
     raise SystemExit("❌ BOT_TOKEN is missing!")
+
+FAL_KEY = os.getenv("FAL_KEY", "").strip().strip('"').strip("'")
+if not FAL_KEY:
+    raise SystemExit("❌ FAL_KEY is missing! Set it in Railway Variables.")
+os.environ["FAL_KEY"] = FAL_KEY
 
 MAX_PHOTOS         = 10
 MAX_TEMPLATES      = 10

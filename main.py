@@ -1506,7 +1506,7 @@ def main() -> None:
             ],
             UPLOADING_PHOTOS: [
                 MessageHandler(filters.PHOTO, photo_received),
-                CallbackQueryHandler(main_menu_callback, pattern="^back_main$"),
+                CallbackQueryHandler(main_menu_callback, pattern="^(menu_upload|menu_get|menu_settings|back_main)$"),
             ],
             SETTINGS_MENU: [
                 CallbackQueryHandler(settings_menu_callback, pattern="^(settings_templates|settings_uniq|back_main)$"),

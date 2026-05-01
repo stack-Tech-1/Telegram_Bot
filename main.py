@@ -20,8 +20,8 @@ import logging
 import hashlib
 import asyncio
 import urllib.parse
+import sqlite3
 import requests
-import fal_client
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
 from dotenv import load_dotenv
@@ -54,14 +54,128 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
 if not BOT_TOKEN:
     raise SystemExit("❌ BOT_TOKEN is missing!")
 
-FAL_KEY = os.getenv("FAL_KEY", "").strip().strip('"').strip("'")
-if not FAL_KEY:
-    raise SystemExit("❌ FAL_KEY is missing! Set it in Railway Variables.")
-os.environ["FAL_KEY"] = FAL_KEY
+ADMIN_IDS = set(
+    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
+)
 
 MAX_PHOTOS         = 10
 MAX_TEMPLATES      = 10
 ALBUM_COLLECT_SECS = 2
+
+CATEGORY_PROMPTS = {
+    "nature": [
+        "lush green forest with golden sunlight rays, serene, scenic",
+        "misty mountain lake at sunrise, reflections, peaceful",
+        "autumn forest path with colorful fallen leaves, warm light",
+        "tropical rainforest canopy, green and lush, natural",
+        "sunflower field at golden hour, warm yellow tones",
+        "rocky mountain peak above clouds, majestic landscape",
+        "peaceful river flowing through green meadow, soft light",
+        "cherry blossom trees in full bloom, pink petals",
+        "snowy pine forest in winter, soft white light",
+        "volcanic black sand beach, dramatic sky, scenic",
+        "rolling green hills with wildflowers, pastoral scene",
+        "desert sand dunes at sunset, golden orange tones",
+        "bamboo forest, green and serene, Japanese aesthetic",
+        "waterfall in tropical jungle, lush and vibrant",
+    ],
+    "city": [
+        "modern city skyline at night with bokeh lights, urban",
+        "rainy city street with reflections on wet pavement, moody",
+        "futuristic city aerial view at dusk, purple and gold tones",
+        "skyscrapers from below, dramatic upward perspective",
+        "european cobblestone street with warm cafe lights at night",
+        "hong kong neon city lights at night, vibrant colors",
+        "london cityscape with river and bridges, daytime",
+        "tokyo street at night with glowing signs, urban energy",
+        "dubai skyline with modern skyscrapers, luxury aesthetic",
+        "paris rooftop view in the evening, romantic",
+        "chicago lakefront skyline, dramatic cloudy sky",
+        "city bridge with light trails from traffic at night",
+        "urban park in autumn, colorful trees and city backdrop",
+        "golden gate bridge in morning fog, scenic",
+    ],
+    "office": [
+        "clean modern office interior with white walls and natural light, minimalist",
+        "cozy reading nook with warm lamp light and bookshelves",
+        "sleek executive office with floor-to-ceiling windows, city view",
+        "modern creative workspace with plants and wooden desk",
+        "elegant boardroom with long table, professional setting",
+        "bright home office with white desk and plant, airy",
+        "industrial loft office with exposed brick and warm lights",
+        "luxury hotel lobby with marble floors, elegant interior",
+        "minimalist zen office space, calm and clean",
+        "modern library interior with high shelves, warm wood tones",
+        "contemporary art gallery white walls, clean and bright",
+        "stylish cafe interior with warm lighting, creative space",
+        "modern studio space with large windows and natural light",
+        "clean pharmaceutical lab interior, white and clinical",
+    ],
+    "abstract": [
+        "colorful geometric abstract art with vibrant shapes, modern",
+        "fluid paint pour with marble texture, blue and gold",
+        "neon glowing abstract lines on dark background, futuristic",
+        "pastel watercolor abstract wash, soft and artistic",
+        "dark dramatic smoke swirls with purple and blue tones",
+        "holographic iridescent abstract surface, rainbow shimmer",
+        "abstract golden geometric patterns on dark background",
+        "colorful ink in water explosion, abstract art",
+        "glitch art abstract digital texture, vibrant and edgy",
+        "abstract aurora borealis waves, green and purple",
+        "crystalline geometric prism light refraction, colorful",
+        "abstract oil paint texture, rich impasto strokes",
+        "retro synthwave grid perspective, purple and pink neon",
+        "abstract black and white swirling pattern, elegant",
+    ],
+    "studio": [
+        "professional photography studio with white seamless backdrop and soft box lights",
+        "dark dramatic studio with single spotlight on grey background",
+        "clean white infinity cove studio, professional and bright",
+        "elegant studio with grey gradient backdrop and professional lighting",
+        "modern photo studio with wooden floor and white background",
+        "high key photography studio, pure white background, bright",
+        "low key dark studio with moody atmospheric lighting",
+        "studio with textured grey concrete backdrop, professional",
+        "clean beige studio with warm soft lighting, natural feel",
+        "professional studio with seamless black background, dramatic",
+        "photography studio with coloured gel lighting, teal and amber",
+        "clean studio setup with reflective floor and white background",
+        "vintage studio aesthetic with warm amber light, retro",
+        "studio with blurred bokeh city window backdrop, urban",
+    ],
+    "beach": [
+        "tropical beach with turquoise water and white sand, sunny day",
+        "dramatic ocean sunset with orange and pink sky, golden hour",
+        "mediterranean coastline with clear blue water, scenic",
+        "hawaii beach with palm trees and volcanic mountains, paradise",
+        "misty rocky beach at sunrise, dramatic and moody",
+        "aerial view of tropical island with clear lagoon, paradise",
+        "caribbean beach with hammock between palm trees, relaxing",
+        "white sand beach with gentle waves and blue sky, serene",
+        "greek island coastal view with whitewashed buildings, blue sea",
+        "bali tropical coastline, lush and vibrant",
+        "stormy beach with dramatic waves and dark clouds",
+        "crystal clear shallow water over sand, tropical",
+        "beach bonfire at night with starry sky, warm glow",
+        "sunrise over calm ocean, soft pastel sky, peaceful",
+    ],
+    "minimal": [
+        "soft pastel gradient background, blush pink to lavender, clean",
+        "white marble texture with gold veins, elegant and minimal",
+        "clean light grey gradient background, professional and simple",
+        "soft blue to white gradient, clean and modern",
+        "warm cream and beige tones, minimal and elegant",
+        "black gradient background, sleek and sophisticated",
+        "soft sage green gradient, calm and natural",
+        "pearl white textured surface, clean and luxurious",
+        "silver metallic gradient background, premium feel",
+        "deep navy blue gradient, professional and rich",
+        "dusty rose pink background, soft and minimal",
+        "soft chartreuse to white gradient, fresh and modern",
+        "minimal terracotta warm gradient, earthy and stylish",
+        "icy light blue gradient, clean and refreshing",
+    ],
+}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -94,7 +208,7 @@ logger = logging.getLogger(__name__)
 # ── Default Settings ───────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
     "generations":   3,
-    "prompt":        "professional studio background, clean, high quality",
+    "category":      "studio",
     "creative_size": 6,
     "transparency":  10,
     "position":      "center",
@@ -134,7 +248,10 @@ def set_user_photos(context, uid, photos: list):
     context.bot_data[f"photos_{uid}"] = photos
 
 def get_user_settings(context, uid) -> dict:
-    return context.bot_data.get(f"settings_{uid}", dict(DEFAULT_SETTINGS))
+    stored = context.bot_data.get(f"settings_{uid}", {})
+    merged = dict(DEFAULT_SETTINGS)
+    merged.update(stored)
+    return merged
 
 def set_user_settings(context, uid, settings: dict):
     context.bot_data[f"settings_{uid}"] = settings
@@ -174,9 +291,9 @@ def decode_template(code: str) -> dict | None:
         payload = json.loads(data)
         if "name" not in payload or "settings" not in payload:
             return None
-        for k in DEFAULT_SETTINGS:
-            if k not in payload["settings"]:
-                return None
+        merged = dict(DEFAULT_SETTINGS)
+        merged.update(payload["settings"])
+        payload["settings"] = merged
         return payload
     except Exception:
         return None
@@ -189,7 +306,7 @@ def decode_template(code: str) -> dict | None:
 def settings_summary(s: dict) -> str:
     return (
         f"🔁 Generations: *{s['generations']}*\n"
-        f"🤖 Prompt: _{s['prompt'][:40]}_\n"
+        f"🎨 Background: _{s.get('category', 'studio').capitalize()}_\n"
         f"📐 Creative Size: *{s['creative_size']}/10*\n"
         f"💧 Transparency: *{s['transparency']}/10*\n"
         f"📍 Position: *{s['position'].capitalize()}*\n"
@@ -208,26 +325,78 @@ def settings_summary(s: dict) -> str:
 
 BG_SIZE = (1024, 1024)
 
-def generate_ai_background(prompt: str) -> Image.Image:
-    full = prompt + ", high quality, photorealistic, scenic, no people, no text"
-    seed = int(time.time() * 1000) % 999999
-    logger.info(f"Generating background via fal.ai seed={seed}")
+def init_bg_db():
+    os.makedirs("/data/backgrounds", exist_ok=True)
+    con = sqlite3.connect("/data/backgrounds.db")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS backgrounds (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT    NOT NULL,
+            category TEXT    NOT NULL,
+            prompt   TEXT,
+            added_by INTEGER,
+            added_at REAL    NOT NULL
+        )
+    """)
+    con.commit()
+    con.close()
 
-    result = fal_client.run(
-        "fal-ai/flux/schnell",
-        arguments={
-            "prompt": full,
-            "image_size": "square_hd",
-            "num_inference_steps": 4,
-            "num_images": 1,
-            "seed": seed,
-        },
-    )
-    image_url = result["images"][0]["url"]
-    resp = requests.get(image_url, timeout=30)
-    resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+
+def get_random_background(category: str) -> Image.Image:
+    con = sqlite3.connect("/data/backgrounds.db")
+    row = con.execute(
+        "SELECT filename FROM backgrounds WHERE category=? ORDER BY RANDOM() LIMIT 1",
+        (category,),
+    ).fetchone()
+    con.close()
+    if not row:
+        raise RuntimeError(
+            f"No backgrounds found for category '{category}'. "
+            "Ask an admin to run /gen_bgs to populate the library."
+        )
+    path = f"/data/backgrounds/{row[0]}"
+    img = Image.open(path).convert("RGBA")
     return img.resize(BG_SIZE, Image.LANCZOS)
+
+
+def add_background_to_db(img: Image.Image, category: str, prompt: str | None, added_by: int | None) -> int:
+    con = sqlite3.connect("/data/backgrounds.db")
+    cur = con.execute(
+        "INSERT INTO backgrounds (filename, category, prompt, added_by, added_at) VALUES (?,?,?,?,?)",
+        ("", category, prompt, added_by, time.time()),
+    )
+    new_id = cur.lastrowid
+    con.commit()
+    con.close()
+    path = f"/data/backgrounds/{new_id}.jpg"
+    img.convert("RGB").save(path, "JPEG", quality=92)
+    con = sqlite3.connect("/data/backgrounds.db")
+    con.execute("UPDATE backgrounds SET filename=? WHERE id=?", (f"{new_id}.jpg", new_id))
+    con.commit()
+    con.close()
+    return new_id
+
+
+def fetch_pollinations_image(prompt: str) -> Image.Image:
+    full = prompt + ", high quality, photorealistic, no people, no text"
+    encoded = urllib.parse.quote(full)
+    seed = int(time.time() * 1000) % 999999
+    url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width=1024&height=1024&nologo=true&enhance=true&seed={seed}"
+    )
+    max_retries = 5
+    for attempt in range(max_retries):
+        resp = requests.get(url, timeout=120)
+        if resp.status_code == 429:
+            wait = 2 ** attempt
+            logger.warning(f"Rate limited (429), retrying in {wait}s")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        return img.resize(BG_SIZE, Image.LANCZOS)
+    raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
 
 
 def remove_background(image_bytes: bytes) -> Image.Image:
@@ -346,8 +515,8 @@ def composite_single(
     s = settings
     bw, bh = BG_SIZE
 
-    # ── Step 1: Generate background ──
-    background = generate_ai_background(s["prompt"])
+    # ── Step 1: Load background from library ──
+    background = get_random_background(s.get("category", "studio"))
 
     # ── Step 2: Apply background blur ──
     background = apply_blur(background, s["blur_bg"])
@@ -950,7 +1119,7 @@ async def show_uniq_settings(query, context, uid) -> int:
     keyboard = [
         [InlineKeyboardButton(f"🔁 Generations: {s['generations']}",         callback_data="set_generations")],
         [InlineKeyboardButton("─── Background ───",                           callback_data="noop")],
-        [InlineKeyboardButton(f"🤖 Prompt",                                   callback_data="set_prompt")],
+        [InlineKeyboardButton(f"🎨 Category: {s.get('category','studio').capitalize()}", callback_data="set_category")],
         [InlineKeyboardButton(f"📐 Creative Size: {s['creative_size']}/10",   callback_data="set_creative_size")],
         [InlineKeyboardButton(f"💧 Transparency: {s['transparency']}/10",     callback_data="set_transparency")],
         [InlineKeyboardButton(f"📍 Position: {s['position'].capitalize()}",   callback_data="set_position")],
@@ -1091,16 +1260,27 @@ async def uniq_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
                                           parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_OVERLAY
 
-    elif query.data == "set_prompt":
+    elif query.data == "set_category":
+        current = s.get("category", "studio")
+        keyboard = [
+            [InlineKeyboardButton(f"{'✅ ' if current == 'nature' else ''}🌿 Nature",     callback_data="cat_nature"),
+             InlineKeyboardButton(f"{'✅ ' if current == 'city' else ''}🌆 City",         callback_data="cat_city")],
+            [InlineKeyboardButton(f"{'✅ ' if current == 'office' else ''}🏢 Office",     callback_data="cat_office"),
+             InlineKeyboardButton(f"{'✅ ' if current == 'abstract' else ''}🎨 Abstract", callback_data="cat_abstract")],
+            [InlineKeyboardButton(f"{'✅ ' if current == 'studio' else ''}📸 Studio",     callback_data="cat_studio"),
+             InlineKeyboardButton(f"{'✅ ' if current == 'beach' else ''}🏖️ Beach",       callback_data="cat_beach")],
+            [InlineKeyboardButton(f"{'✅ ' if current == 'minimal' else ''}⬜ Minimal",   callback_data="cat_minimal")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_uniq")],
+        ]
         try:
             await query.edit_message_caption(
-                f"🤖 *AI Background Prompt*\n\nCurrent: _{s['prompt']}_\n\nType a new prompt:",
-                parse_mode="Markdown",
+                f"🎨 *Background Category*\n\nCurrent: *{current.capitalize()}*\n\nChoose a category:",
+                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard),
             )
         except Exception:
             await query.edit_message_text(
-                f"🤖 *AI Background Prompt*\n\nCurrent: _{s['prompt']}_\n\nType a new prompt:",
-                parse_mode="Markdown",
+                f"🎨 *Background Category*\n\nCurrent: *{current.capitalize()}*\n\nChoose a category:",
+                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard),
             )
         return SET_PROMPT
 
@@ -1191,21 +1371,101 @@ async def overlay_value_callback(update: Update, context: ContextTypes.DEFAULT_T
     return await show_uniq_settings(query, context, uid)
 
 
-async def prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    uid = update.effective_user.id
-    prompt = update.message.text.strip()
-    if len(prompt) < 3:
-        await update.message.reply_text("Please be more descriptive.")
+async def category_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    cat = query.data.replace("cat_", "")
+    if cat not in CATEGORY_PROMPTS:
         return SET_PROMPT
-
     s = get_user_settings(context, uid)
-    s["prompt"] = prompt
+    s["category"] = cat
     set_user_settings(context, uid, s)
+    return await show_uniq_settings(query, context, uid)
 
-    await update.message.reply_text(
-        f"✅ *Prompt updated!*\n\n_{prompt}_",
+
+async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS:
+        await update.message.reply_text("❌ Admin only.")
+        return
+
+    args = context.args
+    categories = [a for a in args if a in CATEGORY_PROMPTS] or list(CATEGORY_PROMPTS.keys())
+
+    con = sqlite3.connect("/data/backgrounds.db")
+    counts = {cat: con.execute("SELECT COUNT(*) FROM backgrounds WHERE category=?", (cat,)).fetchone()[0]
+              for cat in categories}
+    con.close()
+
+    total = sum(max(0, len(CATEGORY_PROMPTS[c]) - counts[c]) for c in categories)
+    if total == 0:
+        await update.message.reply_text("✅ All categories are already fully populated!")
+        return
+
+    msg = await update.message.reply_text(
+        f"⚙️ Generating *{total}* background(s) across {len(categories)} categor{'y' if len(categories)==1 else 'ies'}…\n"
+        "_This may take several minutes. I'll update you on progress._",
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
+    )
+
+    done = 0
+    for cat in categories:
+        prompts = CATEGORY_PROMPTS[cat]
+        existing = counts[cat]
+        to_generate = prompts[existing:]
+        for prompt in to_generate:
+            try:
+                img = await asyncio.to_thread(fetch_pollinations_image, prompt)
+                await asyncio.to_thread(add_background_to_db, img, cat, prompt, uid)
+                done += 1
+                if done % 5 == 0 or done == total:
+                    await msg.edit_text(
+                        f"⏳ *Progress:* {done}/{total} backgrounds generated…",
+                        parse_mode="Markdown",
+                    )
+                await asyncio.sleep(3)
+            except Exception as e:
+                logger.error(f"gen_bgs error for '{cat}': {e}")
+
+    await msg.edit_text(
+        f"✅ *Done!* Generated *{done}/{total}* backgrounds.\n"
+        f"Use /gen_bgs to add more anytime.",
+        parse_mode="Markdown",
+    )
+
+
+async def admin_upload_bg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS:
+        return MAIN_MENU
+
+    caption = (update.message.caption or "").strip()
+    parts = caption.split()
+    if len(parts) < 2 or parts[0] != "#bg":
+        await update.message.reply_text(
+            "To add a background, send a photo with caption:\n`#bg <category>`\n\n"
+            f"Categories: {', '.join(CATEGORY_PROMPTS.keys())}",
+            parse_mode="Markdown",
+        )
+        return MAIN_MENU
+
+    cat = parts[1].lower()
+    if cat not in CATEGORY_PROMPTS:
+        await update.message.reply_text(
+            f"❌ Unknown category `{cat}`.\n\nValid: {', '.join(CATEGORY_PROMPTS.keys())}",
+            parse_mode="Markdown",
+        )
+        return MAIN_MENU
+
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    image_bytes = bytes(await file.download_as_bytearray())
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA").resize(BG_SIZE, Image.LANCZOS)
+    bg_id = await asyncio.to_thread(add_background_to_db, img, cat, None, uid)
+    await update.message.reply_text(
+        f"✅ Background added to *{cat.capitalize()}* library (ID: {bg_id}).",
+        parse_mode="Markdown",
     )
     return MAIN_MENU
 
@@ -1226,11 +1486,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    # Ensure /data directories exist (Railway volume)
+    init_bg_db()
     os.makedirs("/data", exist_ok=True)
     os.makedirs("/data/u2net_models", exist_ok=True)
     persistence = PicklePersistence(filepath="/data/bot_persistence.pkl")
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+
+    app.add_handler(CommandHandler("gen_bgs", gen_bgs))
 
     # Scale value pattern covers all numeric selectors
     scale_pattern = r"^(gen|cs|tr|noise|blurbg|blurfg)_val_\d+$"
@@ -1239,6 +1501,7 @@ def main() -> None:
         entry_points=[CommandHandler("start", start)],
         states={
             MAIN_MENU: [
+                MessageHandler(filters.PHOTO & filters.Caption(["#bg"]), admin_upload_bg),
                 CallbackQueryHandler(main_menu_callback, pattern="^(menu_upload|menu_get|menu_settings|back_main)$"),
             ],
             UPLOADING_PHOTOS: [
@@ -1266,7 +1529,7 @@ def main() -> None:
                 CallbackQueryHandler(uniq_settings_callback,
                                      pattern="^(noop|back_settings|back_uniq|toggle_remove_bg|set_position|"
                                              "set_generations|set_creative_size|set_transparency|set_noise|"
-                                             "set_filter|set_blur_bg|set_blur_fg|set_overlay|set_prompt)$"),
+                                             "set_filter|set_blur_bg|set_blur_fg|set_overlay|set_category)$"),
             ],
             SET_GENERATIONS: [
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
@@ -1299,7 +1562,8 @@ def main() -> None:
                 CallbackQueryHandler(overlay_value_callback, pattern="^(overlay_.+|back_uniq)$"),
             ],
             SET_PROMPT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_received),
+                CallbackQueryHandler(category_selected, pattern="^cat_"),
+                CallbackQueryHandler(scale_value_callback, pattern="^back_uniq$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

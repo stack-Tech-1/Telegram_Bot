@@ -323,7 +323,7 @@ def settings_summary(s: dict) -> str:
 # IMAGE PROCESSING
 # ══════════════════════════════════════════════════════════════════════════════
 
-BG_SIZE = (1024, 1024)
+BG_SIZE = (768, 768)
 
 def init_bg_db():
     os.makedirs("/data/backgrounds", exist_ok=True)
@@ -342,10 +342,12 @@ def init_bg_db():
     con.close()
 
 
+_BG_CACHE: dict = {}
+
 def get_random_background(category: str) -> Image.Image:
     con = sqlite3.connect("/data/backgrounds.db")
     row = con.execute(
-        "SELECT filename FROM backgrounds WHERE category=? ORDER BY RANDOM() LIMIT 1",
+        "SELECT id, filename FROM backgrounds WHERE category=? ORDER BY RANDOM() LIMIT 1",
         (category,),
     ).fetchone()
     con.close()
@@ -354,9 +356,12 @@ def get_random_background(category: str) -> Image.Image:
             f"No backgrounds found for category '{category}'. "
             "Ask an admin to run /gen_bgs to populate the library."
         )
-    path = f"/data/backgrounds/{row[0]}"
-    img = Image.open(path).convert("RGBA")
-    return img.resize(BG_SIZE, Image.LANCZOS)
+    bg_id, filename = row[0], row[1]
+    if bg_id not in _BG_CACHE:
+        path = f"/data/backgrounds/{filename}"
+        img = Image.open(path).convert("RGBA")
+        _BG_CACHE[bg_id] = img.resize(BG_SIZE, Image.LANCZOS)
+    return _BG_CACHE[bg_id].copy()
 
 
 def add_background_to_db(img: Image.Image, category: str, prompt: str | None, added_by: int | None) -> int:
@@ -575,7 +580,7 @@ def composite_single(
 
     # ── Output ──
     out = io.BytesIO()
-    result.convert("RGB").save(out, format="JPEG", quality=90)
+    result.convert("RGB").save(out, format="JPEG", quality=80)
     out.seek(0)
     return out.read()
 

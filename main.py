@@ -571,8 +571,8 @@ async def fetch_pollinations_image_async(prompt: str) -> Image.Image:
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                     if resp.status == 429:
-                        wait = 2 ** attempt
-                        logger.warning(f"Rate limited (429), retrying in {wait}s")
+                        wait = 2 ** attempt + random.uniform(0, 3)
+                        logger.warning(f"Rate limited (429), retrying in {wait:.1f}s")
                         await asyncio.sleep(wait)
                         continue
                     resp.raise_for_status()
@@ -583,7 +583,7 @@ async def fetch_pollinations_image_async(prompt: str) -> Image.Image:
                     return img
             except Exception as e:
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2 ** attempt + random.uniform(0, 3))
                 else:
                     raise
     raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
@@ -1547,6 +1547,8 @@ _generation_running = False
 
 
 async def _bg_generation_worker(worker_id: int, target: int) -> None:
+    # Stagger starts: spread 50 workers over ~100 seconds (2s apart)
+    await asyncio.sleep(worker_id * 2.0 + random.uniform(0, 1))
     while True:
         con = sqlite3.connect("/data/backgrounds.db", timeout=5)
         current = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
@@ -1559,7 +1561,7 @@ async def _bg_generation_worker(worker_id: int, target: int) -> None:
             await asyncio.to_thread(add_background_to_db, img, category, prompt, None)
         except Exception as e:
             logger.warning(f"BG worker {worker_id}: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(random.uniform(5, 15))
 
 
 async def start_bg_generation_pool(n_workers: int = 50, target: int = 700) -> None:

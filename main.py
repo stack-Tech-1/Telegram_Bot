@@ -175,6 +175,134 @@ CATEGORY_PROMPTS = {
         "minimal terracotta warm gradient, earthy and stylish",
         "icy light blue gradient, clean and refreshing",
     ],
+    "desert": [
+        "vast sahara sand dunes at golden hour, warm orange tones",
+        "arizona red rock canyon at sunset, dramatic landscape",
+        "cracked dry desert salt flat, endless horizon, minimalist",
+        "cactus silhouettes against vivid desert sunset, orange sky",
+        "namib desert dunes with star field at night, dark and vast",
+        "oasis in sandy desert with palm trees, blue water",
+        "sandstone arch formation in desert canyon, dramatic light",
+        "wind-carved desert rock formations, warm earthy tones",
+        "desert road stretching to the horizon, golden hour",
+        "wadi canyon with red sandstone walls and blue sky",
+        "sand dunes with dramatic shadows and light, abstract",
+        "atacama desert blooming with wildflowers after rain, colorful",
+        "dead vlei white clay pan with dead acacia trees, Namibia",
+        "desert lightning storm at night, dramatic and powerful",
+    ],
+    "winter": [
+        "snow-covered pine forest at dawn, soft blue light",
+        "frozen lake with cracked ice pattern, aerial view",
+        "snowy mountain village with warm cabin lights, cozy",
+        "blizzard storm with swirling snow, dramatic white",
+        "ice cave interior with blue glacial walls, ethereal",
+        "heavy snowfall in a city street at night, peaceful",
+        "frozen waterfall with icicles, dramatic winter scene",
+        "northern finland snowy forest with aurora overhead",
+        "snow-covered japanese torii gate in winter, red on white",
+        "polar landscape with icebergs in dark water",
+        "fresh snow on tree branches, soft morning light",
+        "alpine ski slope with powder snow, blue sky",
+        "winter sunrise over snowy fields, pink and gold sky",
+        "frozen river with snow banks, misty winter morning",
+    ],
+    "cyberpunk": [
+        "neon-lit cyberpunk alley with rain reflections, blue and pink",
+        "futuristic mega city at night with holographic billboards",
+        "cyberpunk street market with glowing neon signs, tokyo inspired",
+        "dark dystopian city skyline with purple neon glow",
+        "rain-soaked cyberpunk rooftop at night, moody atmosphere",
+        "glowing neon grid corridor, tron-inspired digital space",
+        "cyberpunk character silhouette against neon city backdrop",
+        "futuristic monorail in neon-lit city, motion blur",
+        "hacker den with multiple screens glowing blue in the dark",
+        "virtual reality landscape, glowing wireframe grid, neon",
+        "cyberpunk night market with floating drones, vivid colors",
+        "dark alley with red and teal neon reflections in puddles",
+        "futuristic server room with blue light, sleek and tech",
+        "holographic city map projections, purple and cyan glow",
+    ],
+    "ancient": [
+        "machu picchu at golden sunrise, misty mountain backdrop",
+        "angkor wat temple with lotus pond, cambodia at dawn",
+        "greek parthenon against blue sky, white marble columns",
+        "egyptian pyramids at dusk, orange and gold sky",
+        "roman colosseum interior with dramatic light beams",
+        "stonehenge at sunset with moody dramatic sky",
+        "ancient chinese great wall winding over mountains",
+        "petra rose-red rock city, jordan, dramatic canyon",
+        "japanese castle surrounded by cherry blossoms, spring",
+        "ancient mayan ruins in jungle, overgrown with moss",
+        "colosseum in rome at night with golden lights",
+        "ancient egyptian temple interior with hieroglyphic walls",
+        "greek island monastery on cliff edge above blue sea",
+        "prehistoric cave painting illuminated by torch light, warm",
+    ],
+    "garden": [
+        "japanese zen garden with raked gravel and bonsai, serene",
+        "english rose garden in full bloom, pink and red, summer",
+        "tropical botanical garden with giant lily pads and flowers",
+        "lavender field in provence, purple rows to the horizon",
+        "cherry blossom garden path with pink petals falling",
+        "dutch tulip field with vivid colors, rows of red and yellow",
+        "formal french garden with geometric hedges and fountains",
+        "wildflower meadow in golden afternoon light, natural",
+        "greenhouse interior with lush tropical plants, warm",
+        "bamboo garden path, green and peaceful, japanese",
+        "butterfly garden with colorful flowers and butterflies",
+        "secret garden with moss-covered stone wall and ivy",
+        "water lily pond with reflection of trees, impressionist",
+        "herb garden with terracotta pots and dappled sunlight",
+    ],
+    "ocean": [
+        "deep ocean underwater scene with rays of light, blue and teal",
+        "tropical ocean surface from below, sunlight through water, blue",
+        "stormy ocean waves crashing, dramatic and powerful",
+        "calm turquoise lagoon from above, crystal clear water",
+        "ocean floor with coral reef, colorful fish and marine life",
+        "aerial view of ocean waves on white sand, turquoise water",
+        "underwater cave with blue bioluminescent light",
+        "dark ocean depths with glowing jellyfish, mysterious",
+        "ocean horizon at sunset, gold and orange reflections",
+        "waves breaking on rocky coast, sea spray and mist",
+        "mediterranean sea with clear blue water and rocky cliffs",
+        "tropical ocean tide pool, colorful and vibrant",
+        "sailing boat on calm ocean, aerial view, blue water",
+        "underwater bubbles rising to the surface, deep blue",
+    ],
+    "sky": [
+        "dramatic storm clouds at sunset, orange and purple tones",
+        "clear blue sky with white cumulus clouds, peaceful",
+        "milky way galaxy night sky, stars and purple nebula",
+        "aurora borealis dancing over snow, green and purple",
+        "golden hour sky with scattered clouds, warm tones",
+        "blue sky with light wispy cirrus clouds, serene",
+        "dramatic cumulonimbus thunderstorm clouds, dark and powerful",
+        "pastel pink and orange sunrise sky, soft gradient",
+        "full moon in dark night sky, stars surrounding",
+        "vivid rainbow against dark storm clouds",
+        "aerial view above clouds, white fluffy sea of clouds",
+        "red and orange volcanic sunset sky, dramatic",
+        "twilight blue hour sky just after sunset, deep blue",
+        "foggy misty morning sky over mountains, soft grey",
+    ],
+    "space": [
+        "nebula with vibrant purple and blue gas clouds, stars",
+        "earth from space, blue marble, cloud swirls",
+        "spiral galaxy viewed from space, deep field stars",
+        "saturn with rings detailed, space background",
+        "supernova explosion, vivid red orange plasma, cosmic",
+        "dark matter void, deep space, thousands of stars",
+        "astronaut floating in space, earth in background",
+        "comet streaking through space, bright tail, stars",
+        "lunar surface with earth rising over horizon, apollo",
+        "cosmic black hole with light bending, interstellar",
+        "meteor shower over dark earth from space",
+        "deep space telescope view, thousands of galaxies",
+        "jupiter with great red spot, space background",
+        "star-forming region pillars of creation, cosmic colors",
+    ],
 }
 
 logging.basicConfig(
@@ -194,7 +322,6 @@ logger = logging.getLogger(__name__)
     TEMPLATE_IMPORT_CODE,
     UNIQ_SETTINGS_MENU,
     SET_GENERATIONS,
-    SET_PROMPT,
     SET_CREATIVE_SIZE,
     SET_TRANSPARENCY,
     SET_POSITION,
@@ -203,12 +330,11 @@ logger = logging.getLogger(__name__)
     SET_BLUR_BG,
     SET_BLUR_FG,
     SET_OVERLAY,
-) = range(18)
+) = range(17)
 
 # ── Default Settings ───────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
     "generations":   3,
-    "category":      "studio",
     "creative_size": 6,
     "transparency":  10,
     "position":      "center",
@@ -344,16 +470,23 @@ def init_bg_db():
 
 _BG_CACHE: dict = {}
 
-def get_random_background(category: str) -> Image.Image:
+def get_random_background(exclude_ids: list = None) -> tuple:
     con = sqlite3.connect("/data/backgrounds.db")
-    row = con.execute(
-        "SELECT id, filename FROM backgrounds WHERE category=? ORDER BY RANDOM() LIMIT 1",
-        (category,),
-    ).fetchone()
+    row = None
+    if exclude_ids:
+        placeholders = ",".join("?" * len(exclude_ids))
+        row = con.execute(
+            f"SELECT id, filename FROM backgrounds WHERE id NOT IN ({placeholders}) ORDER BY RANDOM() LIMIT 1",
+            exclude_ids,
+        ).fetchone()
+    if not row:
+        row = con.execute(
+            "SELECT id, filename FROM backgrounds ORDER BY RANDOM() LIMIT 1",
+        ).fetchone()
     con.close()
     if not row:
         raise RuntimeError(
-            f"No backgrounds found for category '{category}'. "
+            "No backgrounds found in the library. "
             "Ask an admin to run /gen_bgs to populate the library."
         )
     bg_id, filename = row[0], row[1]
@@ -361,7 +494,7 @@ def get_random_background(category: str) -> Image.Image:
         path = f"/data/backgrounds/{filename}"
         img = Image.open(path).convert("RGBA")
         _BG_CACHE[bg_id] = img.resize(BG_SIZE, Image.LANCZOS)
-    return _BG_CACHE[bg_id].copy()
+    return bg_id, _BG_CACHE[bg_id].copy()
 
 
 def add_background_to_db(img: Image.Image, category: str, prompt: str | None, added_by: int | None) -> int:
@@ -511,6 +644,7 @@ def composite_single(
     subject_bytes: bytes,
     settings: dict,
     gen_index: int,
+    background: "Image.Image | None" = None,
 ) -> bytes:
     """
     Process one image for one generation.
@@ -521,7 +655,8 @@ def composite_single(
     bw, bh = BG_SIZE
 
     # ── Step 1: Load background from library ──
-    background = get_random_background(s.get("category", "studio"))
+    if background is None:
+        _, background = get_random_background()
 
     # ── Step 2: Apply background blur ──
     background = apply_blur(background, s["blur_bg"])
@@ -790,20 +925,34 @@ async def handle_get_photos(query, context, uid) -> int:
     return MAIN_MENU
 
 
-async def _process_single_batch(bot, photo_file_ids: list, s: dict, gen_idx: int) -> list:
-    """Download photos and process one full batch. Runs concurrently with other batches."""
+async def _process_single_batch(bot, photo_file_ids: list, s: dict, gen_idx: int, context, uid: int) -> list:
+    """Download photos and process one full batch."""
+    seen_ids: list = list(context.bot_data.get(f"seen_bgs_{uid}", []))
+
     batch_results = []
     for photo_idx, file_id in enumerate(photo_file_ids):
         file = await bot.get_file(file_id)
         image_bytes = bytes(await file.download_as_bytearray())
-        # Offset seed by gen_idx so each batch gets a different background
+
+        bg_id, bg_img = get_random_background(seen_ids)
+        seen_ids.append(bg_id)
+
         result_bytes = await asyncio.to_thread(
             composite_single,
             subject_bytes=image_bytes,
             settings=s,
             gen_index=gen_idx * 100 + photo_idx + int(time.time() * 10) % 1000,
+            background=bg_img,
         )
         batch_results.append(result_bytes)
+
+    # Reset cycle once all backgrounds have been seen
+    con = sqlite3.connect("/data/backgrounds.db")
+    total_bgs = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
+    con.close()
+    if len(seen_ids) >= total_bgs:
+        seen_ids = []
+    context.bot_data[f"seen_bgs_{uid}"] = seen_ids
     return batch_results
 
 
@@ -820,7 +969,7 @@ async def do_generate(msg, context, uid, photo_file_ids: list, s: dict):
 
         # Run batches sequentially to avoid hitting Pollinations.ai rate limits
         tasks = [
-            _process_single_batch(msg._bot, photo_file_ids, s, gen_idx)
+            _process_single_batch(msg._bot, photo_file_ids, s, gen_idx, context, uid)
             for gen_idx in range(n_gens)
         ]
         all_results = []
@@ -1124,7 +1273,6 @@ async def show_uniq_settings(query, context, uid) -> int:
     keyboard = [
         [InlineKeyboardButton(f"🔁 Generations: {s['generations']}",         callback_data="set_generations")],
         [InlineKeyboardButton("─── Background ───",                           callback_data="noop")],
-        [InlineKeyboardButton(f"🎨 Category: {s.get('category','studio').capitalize()}", callback_data="set_category")],
         [InlineKeyboardButton(f"📐 Creative Size: {s['creative_size']}/10",   callback_data="set_creative_size")],
         [InlineKeyboardButton(f"💧 Transparency: {s['transparency']}/10",     callback_data="set_transparency")],
         [InlineKeyboardButton(f"📍 Position: {s['position'].capitalize()}",   callback_data="set_position")],
@@ -1265,30 +1413,6 @@ async def uniq_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
                                           parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_OVERLAY
 
-    elif query.data == "set_category":
-        current = s.get("category", "studio")
-        keyboard = [
-            [InlineKeyboardButton(f"{'✅ ' if current == 'nature' else ''}🌿 Nature",     callback_data="cat_nature"),
-             InlineKeyboardButton(f"{'✅ ' if current == 'city' else ''}🌆 City",         callback_data="cat_city")],
-            [InlineKeyboardButton(f"{'✅ ' if current == 'office' else ''}🏢 Office",     callback_data="cat_office"),
-             InlineKeyboardButton(f"{'✅ ' if current == 'abstract' else ''}🎨 Abstract", callback_data="cat_abstract")],
-            [InlineKeyboardButton(f"{'✅ ' if current == 'studio' else ''}📸 Studio",     callback_data="cat_studio"),
-             InlineKeyboardButton(f"{'✅ ' if current == 'beach' else ''}🏖️ Beach",       callback_data="cat_beach")],
-            [InlineKeyboardButton(f"{'✅ ' if current == 'minimal' else ''}⬜ Minimal",   callback_data="cat_minimal")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_uniq")],
-        ]
-        try:
-            await query.edit_message_caption(
-                f"🎨 *Background Category*\n\nCurrent: *{current.capitalize()}*\n\nChoose a category:",
-                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        except Exception:
-            await query.edit_message_text(
-                f"🎨 *Background Category*\n\nCurrent: *{current.capitalize()}*\n\nChoose a category:",
-                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        return SET_PROMPT
-
     return UNIQ_SETTINGS_MENU
 
 
@@ -1375,18 +1499,6 @@ async def overlay_value_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     return await show_uniq_settings(query, context, uid)
 
-
-async def category_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    cat = query.data.replace("cat_", "")
-    if cat not in CATEGORY_PROMPTS:
-        return SET_PROMPT
-    s = get_user_settings(context, uid)
-    s["category"] = cat
-    set_user_settings(context, uid, s)
-    return await show_uniq_settings(query, context, uid)
 
 
 async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1534,7 +1646,7 @@ def main() -> None:
                 CallbackQueryHandler(uniq_settings_callback,
                                      pattern="^(noop|back_settings|back_uniq|toggle_remove_bg|set_position|"
                                              "set_generations|set_creative_size|set_transparency|set_noise|"
-                                             "set_filter|set_blur_bg|set_blur_fg|set_overlay|set_category)$"),
+                                             "set_filter|set_blur_bg|set_blur_fg|set_overlay)$"),
             ],
             SET_GENERATIONS: [
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
@@ -1565,10 +1677,6 @@ def main() -> None:
             ],
             SET_OVERLAY: [
                 CallbackQueryHandler(overlay_value_callback, pattern="^(overlay_.+|back_uniq)$"),
-            ],
-            SET_PROMPT: [
-                CallbackQueryHandler(category_selected, pattern="^cat_"),
-                CallbackQueryHandler(scale_value_callback, pattern="^back_uniq$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

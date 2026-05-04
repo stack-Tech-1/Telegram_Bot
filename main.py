@@ -1582,7 +1582,9 @@ async def _auto_replenish_worker(target: int = 500) -> None:
                 await asyncio.to_thread(add_background_to_db, img, category, prompt, None)
             except Exception as e:
                 logger.warning(f"Auto-replenish error: {e}")
-            await asyncio.sleep(3)
+                await asyncio.sleep(120)
+                continue
+            await asyncio.sleep(30)
     finally:
         _replenish_running = False
         con = sqlite3.connect("/data/backgrounds.db", timeout=5)

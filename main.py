@@ -58,6 +58,9 @@ ADMIN_IDS = set(
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 )
 
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
+CF_API_TOKEN  = os.getenv("CF_API_TOKEN",  "").strip()
+
 MAX_PHOTOS         = 10
 MAX_TEMPLATES      = 10
 ALBUM_COLLECT_SECS = 2
@@ -554,6 +557,25 @@ def fetch_pollinations_image(prompt: str) -> Image.Image:
         return Image.open(io.BytesIO(resp.content)).convert("RGBA")
     raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
 
+
+def fetch_cloudflare_image(prompt: str) -> Image.Image:
+    if not CF_ACCOUNT_ID or not CF_API_TOKEN:
+        raise RuntimeError("CF_ACCOUNT_ID and CF_API_TOKEN environment variables are not set.")
+    full = prompt + ", high quality, photorealistic, no people, no text"
+    resp = requests.post(
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run"
+        f"/@cf/black-forest-labs/flux-1-schnell",
+        headers={
+            "Authorization": f"Bearer {CF_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"prompt": full, "num_steps": 4, "width": 768, "height": 768},
+        timeout=60,
+    )
+    if resp.status_code == 429:
+        raise RuntimeError("Cloudflare daily neuron limit reached. Resets at midnight UTC.")
+    resp.raise_for_status()
+    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
 
 
 def remove_background(image_bytes: bytes) -> Image.Image:
@@ -1548,7 +1570,7 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         to_generate = prompts[existing:]
         for prompt in to_generate:
             try:
-                img = await asyncio.to_thread(fetch_pollinations_image, prompt)
+                img = await asyncio.to_thread(fetch_cloudflare_image, prompt)
                 await asyncio.to_thread(add_background_to_db, img, cat, prompt, uid)
                 done += 1
                 if done % 5 == 0 or done == total:
@@ -1556,7 +1578,7 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"⏳ *Progress:* {done}/{total} backgrounds generated…",
                         parse_mode="Markdown",
                     )
-                await asyncio.sleep(3)
+                await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"gen_bgs error for '{cat}': {e}")
 
@@ -1584,13 +1606,13 @@ async def _auto_replenish_worker(target: int = 500) -> None:
                 break
             prompt, category = generate_random_prompt()
             try:
-                img = await asyncio.to_thread(fetch_pollinations_image, prompt)
+                img = await asyncio.to_thread(fetch_cloudflare_image, prompt)
                 await asyncio.to_thread(add_background_to_db, img, category, prompt, None)
             except Exception as e:
                 logger.warning(f"Auto-replenish error: {e}")
-                await asyncio.sleep(120)
+                await asyncio.sleep(30)
                 continue
-            await asyncio.sleep(30)
+            await asyncio.sleep(2)
     finally:
         _generation_running = False
         con = sqlite3.connect("/data/backgrounds.db", timeout=5)

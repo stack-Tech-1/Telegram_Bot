@@ -540,7 +540,7 @@ def fetch_pollinations_image(prompt: str) -> Image.Image:
     seed = int(time.time() * 1000) % 999999
     url = (
         f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1024&height=1024&nologo=true&enhance=true&seed={seed}"
+        f"?width=768&height=768&nologo=true&seed={seed}"
     )
     max_retries = 5
     for attempt in range(max_retries):
@@ -551,8 +551,7 @@ def fetch_pollinations_image(prompt: str) -> Image.Image:
             time.sleep(wait)
             continue
         resp.raise_for_status()
-        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        return img.resize(BG_SIZE, Image.LANCZOS)
+        return Image.open(io.BytesIO(resp.content)).convert("RGBA")
     raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
 
 

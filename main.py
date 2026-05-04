@@ -1611,6 +1611,24 @@ async def check_bg_pool(context: ContextTypes.DEFAULT_TYPE) -> None:
         asyncio.create_task(_auto_replenish_worker(target=500))
 
 
+async def pool_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS:
+        await update.message.reply_text("❌ Admin only.")
+        return
+    con = sqlite3.connect("/data/backgrounds.db")
+    total = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
+    rows = con.execute(
+        "SELECT category, COUNT(*) FROM backgrounds GROUP BY category ORDER BY category"
+    ).fetchall()
+    con.close()
+    status = "🔄 Replenishment running" if _generation_running else "💤 Idle"
+    lines = [f"📦 *Background Pool Status*", f"Total: *{total}* images | {status}", ""]
+    for cat, count in rows:
+        lines.append(f"• {cat.capitalize()}: {count}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def admin_upload_bg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
     if uid not in ADMIN_IDS:
@@ -1669,6 +1687,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("gen_bgs", gen_bgs))
+    app.add_handler(CommandHandler("pool_status", pool_status))
     app.job_queue.run_repeating(check_bg_pool, interval=60, first=30)
 
     # Scale value pattern covers all numeric selectors

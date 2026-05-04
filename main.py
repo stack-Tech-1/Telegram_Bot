@@ -1512,9 +1512,14 @@ async def overlay_value_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _generation_running
     uid = update.effective_user.id
     if uid not in ADMIN_IDS:
         await update.message.reply_text("❌ Admin only.")
+        return
+
+    if _generation_running:
+        await update.message.reply_text("⚙️ Generation already running (auto-replenishment is active). Try again later.")
         return
 
     args = context.args
@@ -1536,6 +1541,7 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown",
     )
 
+    _generation_running = True
     done = 0
     for cat in categories:
         prompts = CATEGORY_PROMPTS[cat]
@@ -1555,6 +1561,7 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logger.error(f"gen_bgs error for '{cat}': {e}")
 
+    _generation_running = False
     await msg.edit_text(
         f"✅ *Done!* Generated *{done}/{total}* backgrounds.\n"
         f"Use /gen_bgs to add more anytime.",
@@ -1562,12 +1569,12 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-_replenish_running = False
+_generation_running = False
 
 
 async def _auto_replenish_worker(target: int = 500) -> None:
-    global _replenish_running
-    _replenish_running = True
+    global _generation_running
+    _generation_running = True
     logger.info(f"Auto-replenishment started (target={target})")
     try:
         while True:
@@ -1586,7 +1593,7 @@ async def _auto_replenish_worker(target: int = 500) -> None:
                 continue
             await asyncio.sleep(30)
     finally:
-        _replenish_running = False
+        _generation_running = False
         con = sqlite3.connect("/data/backgrounds.db", timeout=5)
         count = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
         con.close()
@@ -1594,7 +1601,7 @@ async def _auto_replenish_worker(target: int = 500) -> None:
 
 
 async def check_bg_pool(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if _replenish_running:
+    if _generation_running:
         return
     con = sqlite3.connect("/data/backgrounds.db", timeout=5)
     count = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]

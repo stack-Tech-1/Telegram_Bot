@@ -21,7 +21,6 @@ import hashlib
 import asyncio
 import urllib.parse
 import sqlite3
-import aiohttp
 import requests
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
@@ -556,37 +555,6 @@ def fetch_pollinations_image(prompt: str) -> Image.Image:
         return img.resize(BG_SIZE, Image.LANCZOS)
     raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
 
-
-async def fetch_pollinations_image_async(prompt: str) -> Image.Image:
-    full = prompt + ", high quality, photorealistic, no people, no text"
-    encoded = urllib.parse.quote(full)
-    seed = int(time.time() * 1000) % 999999
-    url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1024&height=1024&nologo=true&enhance=true&seed={seed}"
-    )
-    max_retries = 5
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(max_retries):
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                    if resp.status == 429:
-                        wait = 2 ** attempt + random.uniform(0, 3)
-                        logger.warning(f"Rate limited (429), retrying in {wait:.1f}s")
-                        await asyncio.sleep(wait)
-                        continue
-                    resp.raise_for_status()
-                    content = await resp.read()
-                    img = await asyncio.to_thread(
-                        lambda c=content: Image.open(io.BytesIO(c)).convert("RGBA").resize(BG_SIZE, Image.LANCZOS)
-                    )
-                    return img
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt + random.uniform(0, 3))
-                else:
-                    raise
-    raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
 
 
 def remove_background(image_bytes: bytes) -> Image.Image:
@@ -1543,72 +1511,95 @@ async def overlay_value_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
-_generation_running = False
-
-
-async def _bg_generation_worker(worker_id: int, target: int) -> None:
-    # Stagger starts: spread 50 workers over ~100 seconds (2s apart)
-    await asyncio.sleep(worker_id * 2.0 + random.uniform(0, 1))
-    while True:
-        con = sqlite3.connect("/data/backgrounds.db", timeout=5)
-        current = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
-        con.close()
-        if current >= target:
-            break
-        prompt, category = generate_random_prompt()
-        try:
-            img = await fetch_pollinations_image_async(prompt)
-            await asyncio.to_thread(add_background_to_db, img, category, prompt, None)
-        except Exception as e:
-            logger.warning(f"BG worker {worker_id}: {e}")
-            await asyncio.sleep(random.uniform(5, 15))
-
-
-async def start_bg_generation_pool(n_workers: int = 50, target: int = 700) -> None:
-    global _generation_running
-    if _generation_running:
-        return
-    _generation_running = True
-    logger.info(f"Starting {n_workers} background generation workers (target={target})")
-    try:
-        await asyncio.gather(*[_bg_generation_worker(i, target) for i in range(n_workers)])
-    finally:
-        _generation_running = False
-        con = sqlite3.connect("/data/backgrounds.db", timeout=5)
-        count = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
-        con.close()
-        logger.info(f"Generation pool finished. Pool size: {count}")
-
-
-async def check_bg_pool(_) -> None:
-    con = sqlite3.connect("/data/backgrounds.db", timeout=5)
-    count = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
-    con.close()
-    if count < 200:
-        logger.info(f"Pool low ({count} remaining) — starting replenishment")
-        asyncio.create_task(start_bg_generation_pool(n_workers=50, target=700))
-
-
-async def gen_bgs(update: Update, _) -> None:
+async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     if uid not in ADMIN_IDS:
         await update.message.reply_text("❌ Admin only.")
         return
+
+    args = context.args
+    categories = [a for a in args if a in CATEGORY_PROMPTS] or list(CATEGORY_PROMPTS.keys())
+
+    con = sqlite3.connect("/data/backgrounds.db")
+    counts = {cat: con.execute("SELECT COUNT(*) FROM backgrounds WHERE category=?", (cat,)).fetchone()[0]
+              for cat in categories}
+    con.close()
+
+    total = sum(max(0, len(CATEGORY_PROMPTS[c]) - counts[c]) for c in categories)
+    if total == 0:
+        await update.message.reply_text("✅ All categories are already fully populated!")
+        return
+
+    msg = await update.message.reply_text(
+        f"⚙️ Generating *{total}* background(s) across {len(categories)} categor{'y' if len(categories)==1 else 'ies'}…\n"
+        "_This may take several minutes. I'll update you on progress._",
+        parse_mode="Markdown",
+    )
+
+    done = 0
+    for cat in categories:
+        prompts = CATEGORY_PROMPTS[cat]
+        existing = counts[cat]
+        to_generate = prompts[existing:]
+        for prompt in to_generate:
+            try:
+                img = await asyncio.to_thread(fetch_pollinations_image, prompt)
+                await asyncio.to_thread(add_background_to_db, img, cat, prompt, uid)
+                done += 1
+                if done % 5 == 0 or done == total:
+                    await msg.edit_text(
+                        f"⏳ *Progress:* {done}/{total} backgrounds generated…",
+                        parse_mode="Markdown",
+                    )
+                await asyncio.sleep(3)
+            except Exception as e:
+                logger.error(f"gen_bgs error for '{cat}': {e}")
+
+    await msg.edit_text(
+        f"✅ *Done!* Generated *{done}/{total}* backgrounds.\n"
+        f"Use /gen_bgs to add more anytime.",
+        parse_mode="Markdown",
+    )
+
+
+_replenish_running = False
+
+
+async def _auto_replenish_worker(target: int = 500) -> None:
+    global _replenish_running
+    _replenish_running = True
+    logger.info(f"Auto-replenishment started (target={target})")
+    try:
+        while True:
+            con = sqlite3.connect("/data/backgrounds.db", timeout=5)
+            current = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
+            con.close()
+            if current >= target:
+                break
+            prompt, category = generate_random_prompt()
+            try:
+                img = await asyncio.to_thread(fetch_pollinations_image, prompt)
+                await asyncio.to_thread(add_background_to_db, img, category, prompt, None)
+            except Exception as e:
+                logger.warning(f"Auto-replenish error: {e}")
+            await asyncio.sleep(3)
+    finally:
+        _replenish_running = False
+        con = sqlite3.connect("/data/backgrounds.db", timeout=5)
+        count = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
+        con.close()
+        logger.info(f"Auto-replenishment finished. Pool size: {count}")
+
+
+async def check_bg_pool(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _replenish_running:
+        return
     con = sqlite3.connect("/data/backgrounds.db", timeout=5)
     count = con.execute("SELECT COUNT(*) FROM backgrounds").fetchone()[0]
     con.close()
-    if _generation_running:
-        await update.message.reply_text(
-            f"⚙️ Generation already running. Pool currently has *{count}* backgrounds.",
-            parse_mode="Markdown",
-        )
-        return
-    await update.message.reply_text(
-        f"⚙️ Starting 50-worker generation pool (target: 700).\n"
-        f"Current pool: *{count}* backgrounds. Running in background…",
-        parse_mode="Markdown",
-    )
-    asyncio.create_task(start_bg_generation_pool(n_workers=50, target=700))
+    if count < 150:
+        logger.info(f"Pool low ({count} remaining) — starting auto-replenishment")
+        asyncio.create_task(_auto_replenish_worker(target=500))
 
 
 async def admin_upload_bg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1669,7 +1660,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("gen_bgs", gen_bgs))
-    app.job_queue.run_repeating(check_bg_pool, interval=60, first=10)
+    app.job_queue.run_repeating(check_bg_pool, interval=60, first=30)
 
     # Scale value pattern covers all numeric selectors
     scale_pattern = r"^(gen|cs|tr|noise|blurbg|blurfg)_val_\d+$"

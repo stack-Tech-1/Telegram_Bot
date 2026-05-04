@@ -4,7 +4,4 @@ requests==2.32.3
 python-dotenv==1.0.1
 rembg[cpu]==2.0.57
 numpy==1.26.4
-aiohttp==3.10.5
-aiofiles==24.1.0
 APScheduler==3.10.4
-fal-client==0.5.9

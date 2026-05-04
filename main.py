@@ -15,6 +15,7 @@ import re
 import time
 import json
 import math
+import base64
 import random
 import logging
 import hashlib
@@ -575,7 +576,9 @@ def fetch_cloudflare_image(prompt: str) -> Image.Image:
     if resp.status_code == 429:
         raise RuntimeError("Cloudflare daily neuron limit reached. Resets at midnight UTC.")
     resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    data = resp.json()
+    image_bytes = base64.b64decode(data["result"]["image"])
+    return Image.open(io.BytesIO(image_bytes)).convert("RGBA")
 
 
 def remove_background(image_bytes: bytes) -> Image.Image:
@@ -1584,9 +1587,8 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     _generation_running = False
     await msg.edit_text(
-        f"✅ *Done!* Generated *{done}/{total}* backgrounds.\n"
-        f"Use /gen_bgs to add more anytime.",
-        parse_mode="Markdown",
+        f"✅ Done! Generated {done}/{total} backgrounds.\n"
+        f"Use /gen_bgs to add more anytime."
     )
 
 

@@ -20,8 +20,10 @@ import random
 import logging
 import hashlib
 import asyncio
+import threading
 import urllib.parse
 import sqlite3
+from datetime import datetime, timedelta
 import requests
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
@@ -59,8 +61,28 @@ ADMIN_IDS = set(
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 )
 
-CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
-CF_API_TOKEN  = os.getenv("CF_API_TOKEN",  "").strip()
+def _parse_cf_keys() -> list:
+    raw = os.getenv("CF_KEYS", "").strip()
+    if raw:
+        keys = []
+        for entry in raw.split(","):
+            entry = entry.strip()
+            if ":" in entry:
+                account_id, token = entry.split(":", 1)
+                keys.append({"account_id": account_id.strip(), "token": token.strip()})
+        if keys:
+            return keys
+    # Fallback to legacy single-key env vars
+    acct = os.getenv("CF_ACCOUNT_ID", "").strip()
+    tok  = os.getenv("CF_API_TOKEN",  "").strip()
+    if acct and tok:
+        return [{"account_id": acct, "token": tok}]
+    return []
+
+CF_KEYS_LIST = _parse_cf_keys()
+
+_cf_key_lock = threading.Lock()
+_cf_state    = {"index": 0, "cooldowns": {}}  # cooldowns: {key_index -> datetime}
 
 MAX_PHOTOS         = 10
 MAX_TEMPLATES      = 10
@@ -559,22 +581,51 @@ def fetch_pollinations_image(prompt: str) -> Image.Image:
     raise RuntimeError("Pollinations.ai rate limit exceeded after retries.")
 
 
+def _get_next_cf_key() -> tuple:
+    with _cf_key_lock:
+        now = datetime.utcnow()
+        n = len(CF_KEYS_LIST)
+        for i in range(n):
+            idx = (_cf_state["index"] + i) % n
+            cooldown_until = _cf_state["cooldowns"].get(idx)
+            if cooldown_until is None or now >= cooldown_until:
+                _cf_state["index"] = (idx + 1) % n
+                return idx, CF_KEYS_LIST[idx]
+        raise RuntimeError(
+            f"All {n} Cloudflare API key(s) are rate-limited. Resets at midnight UTC."
+        )
+
+
+def _mark_cf_key_cooldown(idx: int) -> None:
+    now = datetime.utcnow()
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    with _cf_key_lock:
+        _cf_state["cooldowns"][idx] = midnight
+    short_id = CF_KEYS_LIST[idx]["account_id"][-6:]
+    logger.warning(f"CF key {idx} (...{short_id}) rate-limited — cooling down until {midnight} UTC")
+
+
 def fetch_cloudflare_image(prompt: str) -> Image.Image:
-    if not CF_ACCOUNT_ID or not CF_API_TOKEN:
-        raise RuntimeError("CF_ACCOUNT_ID and CF_API_TOKEN environment variables are not set.")
+    if not CF_KEYS_LIST:
+        raise RuntimeError(
+            "No Cloudflare keys configured. Set CF_KEYS or CF_ACCOUNT_ID+CF_API_TOKEN."
+        )
     full = prompt + ", high quality, photorealistic, no people, no text"
+    key_idx, key = _get_next_cf_key()
+    logger.info(f"CF request via key {key_idx} (account ...{key['account_id'][-6:]})")
     resp = requests.post(
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run"
+        f"https://api.cloudflare.com/client/v4/accounts/{key['account_id']}/ai/run"
         f"/@cf/black-forest-labs/flux-1-schnell",
         headers={
-            "Authorization": f"Bearer {CF_API_TOKEN}",
+            "Authorization": f"Bearer {key['token']}",
             "Content-Type": "application/json",
         },
         json={"prompt": full, "num_steps": 4, "width": 768, "height": 768},
         timeout=60,
     )
     if resp.status_code == 429:
-        raise RuntimeError("Cloudflare daily neuron limit reached. Resets at midnight UTC.")
+        _mark_cf_key_cooldown(key_idx)
+        return fetch_cloudflare_image(prompt)
     resp.raise_for_status()
     data = resp.json()
     image_bytes = base64.b64decode(data["result"]["image"])

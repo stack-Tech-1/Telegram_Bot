@@ -938,9 +938,13 @@ async def show_main_menu(query_or_msg, context, uid, edit=True):
 
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
-    photo = update.message.photo[-1]
-    media_group_id = update.message.media_group_id
-    file_id = photo.file_id
+    msg = update.message
+    media_group_id = msg.media_group_id
+
+    if msg.document:
+        file_id = msg.document.file_id
+    else:
+        file_id = msg.photo[-1].file_id
 
     album_key = f"album_{uid}"
 
@@ -1776,6 +1780,7 @@ def main() -> None:
             ],
             UPLOADING_PHOTOS: [
                 MessageHandler(filters.PHOTO, photo_received),
+                MessageHandler(filters.Document.IMAGE, photo_received),
                 CallbackQueryHandler(main_menu_callback, pattern="^(menu_upload|menu_get|menu_settings|back_main)$"),
             ],
             SETTINGS_MENU: [

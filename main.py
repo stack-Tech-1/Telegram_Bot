@@ -510,8 +510,6 @@ def init_bg_db():
     con.close()
 
 
-_BG_CACHE: dict = {}
-
 def get_random_background() -> tuple:
     con = sqlite3.connect("/data/backgrounds.db", timeout=5)
     row = con.execute("SELECT id, filename FROM backgrounds ORDER BY RANDOM() LIMIT 1").fetchone()
@@ -522,10 +520,8 @@ def get_random_background() -> tuple:
             "Ask an admin to run /gen_bgs to populate the library."
         )
     bg_id, filename = row
-    if bg_id not in _BG_CACHE:
-        img = Image.open(f"/data/backgrounds/{filename}").convert("RGBA")
-        _BG_CACHE[bg_id] = img.resize(BG_SIZE, Image.LANCZOS)
-    return bg_id, _BG_CACHE[bg_id].copy()
+    img = Image.open(f"/data/backgrounds/{filename}").convert("RGBA")
+    return bg_id, img.resize(BG_SIZE, Image.LANCZOS)
 
 
 def delete_background(bg_id: int) -> None:
@@ -539,7 +535,6 @@ def delete_background(bg_id: int) -> None:
             os.remove(f"/data/backgrounds/{row[0]}")
         except FileNotFoundError:
             pass
-    _BG_CACHE.pop(bg_id, None)
 
 
 def add_background_to_db(img: Image.Image, category: str, prompt: str | None, added_by: int | None) -> int:
@@ -1056,14 +1051,10 @@ async def do_generate(msg, photo_file_ids: list, s: dict):
             parse_mode="Markdown",
         )
 
-        # Run batches sequentially to avoid hitting Pollinations.ai rate limits
-        tasks = [
-            _process_single_batch(msg._bot, photo_file_ids, s, gen_idx)
-            for gen_idx in range(n_gens)
-        ]
         all_results = []
-        for task in tasks:
-            all_results.append(await task)
+        for gen_idx in range(n_gens):
+            batch = await _process_single_batch(msg._bot, photo_file_ids, s, gen_idx)
+            all_results.append(batch)
 
         # Send results in order
         for gen_idx, batch_results in enumerate(all_results):
@@ -1642,8 +1633,7 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     _generation_running = False
     await msg.edit_text(
-        f"✅ Done! Generated {done}/{total} backgrounds.\n"
-        f"Use /gen_bgs to add more anytime."
+        f"✅ Done! Generated {done}/{total} backgrounds.\nUse /gen_bgs to add more anytime."
     )
 
 

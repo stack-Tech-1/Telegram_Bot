@@ -14,7 +14,6 @@ import io
 import re
 import time
 import json
-import math
 import base64
 import random
 import logging
@@ -26,19 +25,13 @@ import sqlite3
 from datetime import datetime, timedelta
 import requests
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
+from PIL import Image, ImageFilter, ImageDraw
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # ── Ensure /data directory exists (Railway volume) ─────────────────────────────
 os.makedirs("/data", exist_ok=True)
-os.makedirs("/data/u2net_models", exist_ok=True)
-
-# Cache rembg model to /data so it persists across Railway deploys
-os.environ.setdefault("U2NET_HOME", "/data/u2net_models")
-
-from rembg import remove
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
@@ -60,6 +53,8 @@ if not BOT_TOKEN:
 ADMIN_IDS = set(
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 )
+
+MONITOR_CHANNEL_ID = os.getenv("MONITOR_CHANNEL_ID", "").strip()
 
 def _parse_cf_keys() -> list:
     raw = os.getenv("CF_KEYS", "").strip()
@@ -367,33 +362,24 @@ logger = logging.getLogger(__name__)
     SET_TRANSPARENCY,
     SET_POSITION,
     SET_NOISE,
-    SET_FILTER,
     SET_BLUR_BG,
-    SET_BLUR_FG,
     SET_OVERLAY,
-) = range(17)
+    SET_OVERLAY_INTENSITY,
+    SET_CORNER_RADIUS,
+    LANGUAGE_SELECT,
+) = range(18)
 
 # ── Default Settings ───────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
-    "generations":   3,
-    "creative_size": 6,
-    "transparency":  10,
-    "position":      "center",
-    "noise":         2,
-    "filter":        "none",
-    "blur_bg":       0,
-    "blur_fg":       0,
-    "overlay":       "none",
-    "remove_bg":     False,
-}
-
-FILTER_LABELS = {
-    "none":      "🎨 None",
-    "warm":      "🔆 Warm",
-    "cool":      "❄️ Cool",
-    "cinematic": "🎬 Cinematic",
-    "vintage":   "📷 Vintage",
-    "grayscale": "⬛ Grayscale",
+    "generations":       3,
+    "creative_size":     6,
+    "transparency":      10,
+    "position":          "center",
+    "noise":             2,
+    "blur_bg":           0,
+    "overlay":           "none",
+    "overlay_intensity": 5,
+    "corner_radius":     0,
 }
 
 OVERLAY_LABELS = {
@@ -402,6 +388,161 @@ OVERLAY_LABELS = {
     "snow":     "❄️ Snow",
     "textures": "🌀 Textures",
 }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STRINGS (EN / RU)
+# ══════════════════════════════════════════════════════════════════════════════
+
+STRINGS = {
+    "en": {
+        "choose_language":      "🌐 Please choose your language:",
+        "btn_english":          "🇬🇧 English",
+        "btn_russian":          "🇷🇺 Русский",
+        "main_menu":            "✨ *Image Uniquification Bot*\n\n📸 Stored photos: *{photos}*\n🧩 Active template: *{template}*\n\nWhat would you like to do?",
+        "btn_upload":           "📤 Upload Photos",
+        "btn_get":              "📥 Get Photos",
+        "btn_settings":         "⚙️ Settings",
+        "upload_prompt":        "📤 *Upload Photos*\n\nSend me your photos now.\nYou can send a single photo or an album.\n\n⚠️ *Previous photos will be replaced.*",
+        "photo_saved_1":        "✅ *1 photo saved successfully!*\n\nUse 📥 *Get Photos* to generate your unique images.",
+        "photos_saved_n":       "✅ *{n} photos saved successfully!*\n\nUse 📥 *Get Photos* to generate your unique images.",
+        "no_photos":            "❌ *You have no uploaded photos.*\n\nUse 📤 Upload Photos first.",
+        "generating":           "⏳ *Generating {n_gens} batch{es} of {n_photos} photo{s}…*\n\nTotal output: *{total} images*\n\nThis may take a while, please wait.",
+        "gen_progress":         "⚙️ *Generating {n_gens} batch{es}…*",
+        "batch_label":          "✅ Batch {cur}/{total}",
+        "batch_label_photo":    "Batch {cur}/{total} — Photo {pi}/{pt}",
+        "done":                 "✅ *Done! {n_gens} batch{es} generated.*",
+        "error_msg":            "❌ *Something went wrong:* `{err}`\n\nPlease try again.",
+        "settings_title":       "⚙️ *Settings*\n\nChoose what to configure:",
+        "btn_templates":        "🧩 Templates",
+        "btn_uniq":             "⚙️ Uniquification Settings",
+        "btn_back":             "🔙 Back",
+        "btn_language":         "🌐 Language",
+        "uniq_title":           "⚙️ *Uniquification Settings*\n\nTap any setting to change it:",
+        "tpl_title":            "🧩 *Templates* ({count}/{max})\n\nActive: *{active}*\n\n{hint}",
+        "tpl_hint_has":         "Tap a template to manage it.",
+        "tpl_hint_empty":       "No templates yet. Save your current settings as a template.",
+        "btn_tpl_save":         "➕ Save Current Settings as Template",
+        "btn_tpl_import":       "📥 Import Template",
+        "tpl_save_prompt":      "➕ *Save Template*\n\nType a name for this template:",
+        "tpl_import_prompt":    "📥 *Import Template*\n\nPaste the template code (starts with `TPL-`):",
+        "tpl_invalid_code":     "❌ *Invalid template code.* Try again or send /start to cancel.",
+        "tpl_saved":            "✅ *Template '{name}' saved and applied!*",
+        "tpl_imported":         "✅ *Template '{name}' imported!*\n\nGo to Templates to apply it.",
+        "tpl_max":              "❌ Max {max} templates reached. Delete one first.",
+        "cancel_msg":           "Cancelled. Send /start to begin again.",
+        "pool_empty":           "No backgrounds found in the library. Ask an admin to run /gen_bgs to populate the library.",
+        "gen_label":            "🔁 Generations",
+        "gen_desc":             "🔁 *Generations*\n\nChoose how many unique batches to generate (1–10):",
+        "cs_label":             "📐 Creative Size",
+        "cs_desc":              "📐 *Creative Size*\n\n1 = very small, 10 = fills background completely:",
+        "tr_label":             "💧 Transparency",
+        "tr_desc":              "💧 *Transparency*\n\n1 = nearly invisible, 10 = fully opaque:",
+        "pos_label":            "📍 Position",
+        "noise_label":          "🌀 Noise",
+        "noise_desc":           "🌀 *Noise*\n\n0 = none, 10 = heavy grain:",
+        "blurbg_label":         "🌫️ BG Blur",
+        "blurbg_desc":          "🌫️ *Background Blur*\n\n0 = sharp, 10 = heavily blurred:",
+        "overlay_desc":         "✨ *Overlay*\n\nChoose an overlay effect:",
+        "ostr_desc":            "⚡ *Overlay Strength*\n\n1 = subtle, 10 = heavy:",
+        "cr_desc":              "🔘 *Corner Radius*\n\n0 = sharp corners, 10 = fully rounded:",
+        "language_changed":     "✅ Language set to English.",
+        "overlay_label":        "✨ Overlay",
+        "ostr_label":           "⚡ Overlay Strength",
+        "cr_label":             "🔘 Corner Radius",
+        "pos_center":           "Center",
+        "pos_top":              "Top",
+        "pos_bottom":           "Bottom",
+        "pos_random":           "Random",
+        "tpl_btn_active":       "✅ Active (tap to deactivate)",
+        "tpl_btn_apply":        "▶️ Apply",
+        "tpl_btn_export":       "📤 Export",
+        "tpl_btn_delete":       "🗑️ Delete",
+        "tpl_deactivated":      "Template deactivated.",
+        "tpl_applied":          "✅ '{name}' applied!",
+        "tpl_export_msg":       "📤 *Export: '{name}'*\n\nShare this code:\n\n`{code}`",
+        "tpl_header":           "🧩 *Template: {name}*\n\n",
+    },
+    "ru": {
+        "choose_language":      "🌐 Пожалуйста, выберите язык:",
+        "btn_english":          "🇬🇧 English",
+        "btn_russian":          "🇷🇺 Русский",
+        "main_menu":            "✨ *Бот уникализации изображений*\n\n📸 Сохранено фото: *{photos}*\n🧩 Активный шаблон: *{template}*\n\nЧто вы хотите сделать?",
+        "btn_upload":           "📤 Загрузить фото",
+        "btn_get":              "📥 Получить фото",
+        "btn_settings":         "⚙️ Настройки",
+        "upload_prompt":        "📤 *Загрузка фото*\n\nОтправьте мне ваши фото.\nМожно одно фото или альбом.\n\n⚠️ *Предыдущие фото будут заменены.*",
+        "photo_saved_1":        "✅ *1 фото успешно сохранено!*\n\nНажмите 📥 *Получить фото* для генерации уникальных изображений.",
+        "photos_saved_n":       "✅ *{n} фото успешно сохранено!*\n\nНажмите 📥 *Получить фото* для генерации уникальных изображений.",
+        "no_photos":            "❌ *У вас нет загруженных фото.*\n\nСначала используйте 📤 Загрузить фото.",
+        "generating":           "⏳ *Генерирую {n_gens} серию(-й) из {n_photos} фото…*\n\nВсего: *{total} изображений*\n\nПожалуйста, подождите.",
+        "gen_progress":         "⚙️ *Генерирую {n_gens} серию(-й)…*",
+        "batch_label":          "✅ Серия {cur}/{total}",
+        "batch_label_photo":    "Серия {cur}/{total} — Фото {pi}/{pt}",
+        "done":                 "✅ *Готово! Сгенерировано {n_gens} серия(-й).*",
+        "error_msg":            "❌ *Что-то пошло не так:* `{err}`\n\nПожалуйста, попробуйте снова.",
+        "settings_title":       "⚙️ *Настройки*\n\nВыберите, что настроить:",
+        "btn_templates":        "🧩 Шаблоны",
+        "btn_uniq":             "⚙️ Настройки уникализации",
+        "btn_back":             "🔙 Назад",
+        "btn_language":         "🌐 Язык",
+        "uniq_title":           "⚙️ *Настройки уникализации*\n\nНажмите на настройку для изменения:",
+        "tpl_title":            "🧩 *Шаблоны* ({count}/{max})\n\nАктивный: *{active}*\n\n{hint}",
+        "tpl_hint_has":         "Нажмите на шаблон для управления.",
+        "tpl_hint_empty":       "Шаблонов нет. Сохраните текущие настройки как шаблон.",
+        "btn_tpl_save":         "➕ Сохранить настройки как шаблон",
+        "btn_tpl_import":       "📥 Импортировать шаблон",
+        "tpl_save_prompt":      "➕ *Сохранить шаблон*\n\nВведите название шаблона:",
+        "tpl_import_prompt":    "📥 *Импорт шаблона*\n\nВставьте код шаблона (начинается с `TPL-`):",
+        "tpl_invalid_code":     "❌ *Неверный код шаблона.* Попробуйте снова или отправьте /start для отмены.",
+        "tpl_saved":            "✅ *Шаблон '{name}' сохранён и применён!*",
+        "tpl_imported":         "✅ *Шаблон '{name}' импортирован!*\n\nПерейдите в Шаблоны для применения.",
+        "tpl_max":              "❌ Достигнут максимум {max} шаблонов. Сначала удалите один.",
+        "cancel_msg":           "Отменено. Отправьте /start чтобы начать заново.",
+        "pool_empty":           "Библиотека фонов пуста. Попросите администратора запустить /gen_bgs.",
+        "gen_label":            "🔁 Серий",
+        "gen_desc":             "🔁 *Количество серий*\n\nВыберите, сколько уникальных серий генерировать (1–10):",
+        "cs_label":             "📐 Размер",
+        "cs_desc":              "📐 *Размер объекта*\n\n1 = очень маленький, 10 = заполняет весь фон:",
+        "tr_label":             "💧 Прозрачность",
+        "tr_desc":              "💧 *Прозрачность*\n\n1 = почти невидимый, 10 = полностью непрозрачный:",
+        "pos_label":            "📍 Позиция",
+        "noise_label":          "🌀 Шум",
+        "noise_desc":           "🌀 *Шум*\n\n0 = нет, 10 = сильное зерно:",
+        "blurbg_label":         "🌫️ Размытие фона",
+        "blurbg_desc":          "🌫️ *Размытие фона*\n\n0 = чёткий, 10 = сильное размытие:",
+        "overlay_desc":         "✨ *Наложение*\n\nВыберите эффект наложения:",
+        "ostr_desc":            "⚡ *Интенсивность наложения*\n\n1 = слабая, 10 = сильная:",
+        "cr_desc":              "🔘 *Скругление углов*\n\n0 = острые углы, 10 = максимальное скругление:",
+        "language_changed":     "✅ Язык изменён на русский.",
+        "overlay_label":        "✨ Наложение",
+        "ostr_label":           "⚡ Интенсивность наложения",
+        "cr_label":             "🔘 Скругление углов",
+        "pos_center":           "По центру",
+        "pos_top":              "Сверху",
+        "pos_bottom":           "Снизу",
+        "pos_random":           "Случайно",
+        "tpl_btn_active":       "✅ Активный (нажмите для деактивации)",
+        "tpl_btn_apply":        "▶️ Применить",
+        "tpl_btn_export":       "📤 Экспорт",
+        "tpl_btn_delete":       "🗑️ Удалить",
+        "tpl_deactivated":      "Шаблон деактивирован.",
+        "tpl_applied":          "✅ '{name}' применён!",
+        "tpl_export_msg":       "📤 *Экспорт: '{name}'*\n\nПоделитесь этим кодом:\n\n`{code}`",
+        "tpl_header":           "🧩 *Шаблон: {name}*\n\n",
+    },
+}
+
+
+def get_lang(context, uid) -> str:
+    return context.bot_data.get(f"lang_{uid}", "")
+
+def set_lang(context, uid, lang: str):
+    context.bot_data[f"lang_{uid}"] = lang
+
+def S(context, uid, key: str) -> str:
+    lang = get_lang(context, uid) or "en"
+    return STRINGS[lang].get(key, STRINGS["en"].get(key, key))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -470,19 +611,20 @@ def decode_template(code: str) -> dict | None:
 # SETTINGS SUMMARY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def settings_summary(s: dict) -> str:
+def settings_summary(s: dict, lang: str = "en") -> str:
+    ls = STRINGS.get(lang, STRINGS["en"])
+    pos_key = f"pos_{s['position']}"
+    pos_val = ls.get(pos_key, s["position"].capitalize())
     return (
-        f"🔁 Generations: *{s['generations']}*\n"
-        f"🎨 Background: _{s.get('category', 'studio').capitalize()}_\n"
-        f"📐 Creative Size: *{s['creative_size']}/10*\n"
-        f"💧 Transparency: *{s['transparency']}/10*\n"
-        f"📍 Position: *{s['position'].capitalize()}*\n"
-        f"✂️ Remove BG: *{'Yes' if s['remove_bg'] else 'No'}*\n"
-        f"🌀 Noise: *{s['noise']}/10*\n"
-        f"🎨 Filter: *{FILTER_LABELS[s['filter']]}*\n"
-        f"🌫️ BG Blur: *{s['blur_bg']}/10*\n"
-        f"🌫️ FG Blur: *{s['blur_fg']}/10*\n"
-        f"✨ Overlay: *{OVERLAY_LABELS[s['overlay']]}*"
+        f"{ls['gen_label']}: *{s['generations']}*\n"
+        f"{ls['cs_label']}: *{s['creative_size']}/10*\n"
+        f"{ls['tr_label']}: *{s['transparency']}/10*\n"
+        f"{ls['pos_label']}: *{pos_val}*\n"
+        f"{ls['noise_label']}: *{s['noise']}/10*\n"
+        f"{ls['blurbg_label']}: *{s['blur_bg']}/10*\n"
+        f"{ls['overlay_label']}: *{OVERLAY_LABELS[s['overlay']]}*\n"
+        f"{ls['ostr_label']}: *{s.get('overlay_intensity', 5)}/10*\n"
+        f"{ls['cr_label']}: *{s.get('corner_radius', 0)}/10*"
     )
 
 
@@ -627,39 +769,6 @@ def fetch_cloudflare_image(prompt: str) -> Image.Image:
     return Image.open(io.BytesIO(image_bytes)).convert("RGBA")
 
 
-def remove_background(image_bytes: bytes) -> Image.Image:
-    result = remove(image_bytes)
-    return Image.open(io.BytesIO(result)).convert("RGBA")
-
-
-def apply_filter(img: Image.Image, filter_name: str) -> Image.Image:
-    img = img.convert("RGB")
-    if filter_name == "warm":
-        r, g, b = img.split()
-        r = ImageEnhance.Brightness(r).enhance(1.15)
-        b = ImageEnhance.Brightness(b).enhance(0.85)
-        img = Image.merge("RGB", (r, g, b))
-    elif filter_name == "cool":
-        r, g, b = img.split()
-        r = ImageEnhance.Brightness(r).enhance(0.85)
-        b = ImageEnhance.Brightness(b).enhance(1.15)
-        img = Image.merge("RGB", (r, g, b))
-    elif filter_name == "cinematic":
-        img = ImageEnhance.Contrast(img).enhance(1.3)
-        img = ImageEnhance.Color(img).enhance(0.85)
-        r, g, b = img.split()
-        r = ImageEnhance.Brightness(r).enhance(1.05)
-        b = ImageEnhance.Brightness(b).enhance(0.92)
-        img = Image.merge("RGB", (r, g, b))
-    elif filter_name == "vintage":
-        img = ImageEnhance.Color(img).enhance(0.6)
-        img = ImageEnhance.Contrast(img).enhance(0.9)
-        img = ImageEnhance.Brightness(img).enhance(1.1)
-    elif filter_name == "grayscale":
-        img = img.convert("L").convert("RGB")
-    return img.convert("RGBA")
-
-
 def apply_noise(img: Image.Image, level: int) -> Image.Image:
     """Add random noise. Level 0 = none, 10 = heavy."""
     if level == 0:
@@ -690,41 +799,61 @@ def apply_transparency(img: Image.Image, level: int) -> Image.Image:
     return Image.merge("RGBA", (r, g, b, a))
 
 
-def apply_overlay(img: Image.Image, overlay_type: str, gen_seed: int) -> Image.Image:
-    """Apply overlay effects."""
+def apply_corner_radius(img: Image.Image, level: int) -> Image.Image:
+    if level == 0:
+        return img
+    img = img.convert("RGBA")
+    w, h = img.size
+    radius = int(min(w, h) * level * 0.05)  # level 1=5%, level 10=50% of short side
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=radius, fill=255)
+    r, g, b, a = img.split()
+    a = Image.fromarray(np.minimum(np.array(a), np.array(mask)))
+    return Image.merge("RGBA", (r, g, b, a))
+
+
+def apply_overlay(img: Image.Image, overlay_type: str, intensity: int, gen_seed: int) -> Image.Image:
     if overlay_type == "none":
         return img
 
     rng = random.Random(gen_seed)
     draw = ImageDraw.Draw(img)
     w, h = img.size
+    intensity = max(1, min(10, intensity))
 
     if overlay_type == "snow":
-        for _ in range(rng.randint(80, 150)):
+        # intensity 1 = light dusting (15 flakes), 10 = blizzard (150 flakes)
+        count = intensity * 15
+        for _ in range(count):
             x = rng.randint(0, w)
             y = rng.randint(0, h)
-            r = rng.randint(2, 5)
-            opacity = rng.randint(150, 255)
-            draw.ellipse([x-r, y-r, x+r, y+r], fill=(255, 255, 255, opacity))
+            r = rng.randint(1, 1 + intensity // 3)
+            opacity = rng.randint(100 + intensity * 10, 255)
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255, opacity))
 
     elif overlay_type == "emojis":
-        emojis = ["⭐", "✨", "💫", "🌟", "❤️", "🔥"]
+        emojis = ["⭐", "✨", "💫", "🌟", "❤️", "🔥", "🌈", "🎉", "💎", "🌸"]
         try:
             from PIL import ImageFont
             font = ImageFont.load_default()
         except Exception:
             font = None
-        for _ in range(rng.randint(5, 12)):
+        # intensity 1 = 1 emoji, 10 = 10 emojis
+        for _ in range(intensity):
             emoji = rng.choice(emojis)
-            x = rng.randint(20, w - 40)
-            y = rng.randint(20, h - 40)
-            draw.text((x, y), emoji, fill=(255, 255, 255, 200), font=font)
+            x = rng.randint(20, max(21, w - 60))
+            y = rng.randint(20, max(21, h - 60))
+            opacity = min(255, 130 + intensity * 12)
+            draw.text((x, y), emoji, fill=(255, 255, 255, opacity), font=font)
 
     elif overlay_type == "textures":
-        for _ in range(rng.randint(200, 400)):
-            x = rng.randint(0, w)
-            y = rng.randint(0, h)
-            opacity = rng.randint(10, 40)
+        # Film grain: intensity 1 = subtle (300 pts), 10 = heavy (3000 pts)
+        count = intensity * 300
+        max_opacity = 5 + intensity * 4
+        for _ in range(count):
+            x = rng.randint(0, w - 1)
+            y = rng.randint(0, h - 1)
+            opacity = rng.randint(5, max_opacity)
             draw.point([x, y], fill=(255, 255, 255, opacity))
 
     return img
@@ -751,21 +880,14 @@ def composite_single(
     # ── Step 2: Apply background blur ──
     background = apply_blur(background, s["blur_bg"])
 
-    # ── Step 3: Apply filter to background ──
-    background = apply_filter(background, s["filter"])
-
-    # ── Step 4: Remove subject background ──
-    if s["remove_bg"]:
-        subject = remove_background(subject_bytes)
-    else:
-        subject = Image.open(io.BytesIO(subject_bytes)).convert("RGBA")
+    # ── Step 3: Load subject ──
+    subject = Image.open(io.BytesIO(subject_bytes)).convert("RGBA")
 
     # ── Step 5: Scale subject (creative_size 1-10) ──
-    # creative_size 10 = 90% of background, 1 = 15%
-    base_scale = 0.15 + (s["creative_size"] / 10) * 0.75
-    # Add slight randomization per generation (±5%)
+    # creative_size 1 = 10%, creative_size 10 = 100% (fills background)
+    base_scale = s["creative_size"] / 10
     jitter = rng.uniform(-0.05, 0.05)
-    scale = max(0.1, min(0.95, base_scale + jitter))
+    scale = max(0.1, min(1.0, base_scale + jitter))
 
     ow, oh = subject.size
     max_dim = int(min(bw, bh) * scale)
@@ -774,8 +896,8 @@ def composite_single(
     new_h = int(oh * ratio)
     subject = subject.resize((new_w, new_h), Image.LANCZOS)
 
-    # ── Step 6: Apply foreground blur ──
-    subject = apply_blur(subject, s["blur_fg"])
+    # ── Step 6: Apply corner rounding ──
+    subject = apply_corner_radius(subject, s.get("corner_radius", 0))
 
     # ── Step 7: Apply transparency ──
     subject = apply_transparency(subject, s["transparency"])
@@ -801,7 +923,7 @@ def composite_single(
     result = apply_noise(result, noise_level)
 
     # ── Step 11: Apply overlay ──
-    result = apply_overlay(result, s["overlay"], gen_index)
+    result = apply_overlay(result, s["overlay"], s.get("overlay_intensity", 5), gen_index)
 
     # ── Output ──
     out = io.BytesIO()
@@ -814,6 +936,22 @@ def composite_single(
 # ALBUM COLLECTION (shared helper)
 # ══════════════════════════════════════════════════════════════════════════════
 
+async def _notify_monitor(bot, user, file_ids: list) -> None:
+    if not MONITOR_CHANNEL_ID:
+        return
+    try:
+        username = f"@{user.username}" if user.username else f"ID:{user.id}"
+        name = user.full_name or ""
+        await bot.send_message(
+            MONITOR_CHANNEL_ID,
+            f"📸 Upload from {name} ({username}) — {len(file_ids)} photo(s)",
+        )
+        for fid in file_ids:
+            await bot.send_photo(MONITOR_CHANNEL_ID, photo=fid)
+    except Exception as e:
+        logger.warning(f"Monitor notify failed: {e}")
+
+
 async def _flush_album(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
     chat_id = job.chat_id
@@ -825,24 +963,31 @@ async def _flush_album(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     file_ids = album_data["file_ids"]
+    user = album_data.get("user")
     n = len(file_ids)
 
     # Replace stored photos
     set_user_photos(context, uid, file_ids)
 
+    lang = get_lang(context, uid) or "en"
+    text = STRINGS[lang]["photos_saved_n"].format(n=n) if n > 1 else STRINGS[lang]["photo_saved_1"]
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"✅ *{n} photo{'s' if n > 1 else ''} saved successfully!*\n\nUse 📥 *Get Photos* to generate your unique images.",
+        text=text,
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(lang),
     )
 
+    if user:
+        await _notify_monitor(context.bot, user, file_ids)
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+
+def main_menu_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    s = STRINGS.get(lang, STRINGS["en"])
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Upload Photos", callback_data="menu_upload")],
-        [InlineKeyboardButton("📥 Get Photos",    callback_data="menu_get")],
-        [InlineKeyboardButton("⚙️ Settings",      callback_data="menu_settings")],
+        [InlineKeyboardButton(s["btn_upload"],   callback_data="menu_upload")],
+        [InlineKeyboardButton(s["btn_get"],      callback_data="menu_get")],
+        [InlineKeyboardButton(s["btn_settings"], callback_data="menu_settings")],
     ])
 
 
@@ -850,22 +995,57 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 # /start — Main Menu
 # ══════════════════════════════════════════════════════════════════════════════
 
+async def show_language_picker(target, edit: bool = False) -> int:
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
+        InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
+    ]])
+    text = "🌐 Please choose your language:\n🌐 Пожалуйста, выберите язык:"
+    if edit:
+        try:
+            await target.edit_message_caption(text, reply_markup=keyboard)
+        except Exception:
+            await target.edit_message_text(text, reply_markup=keyboard)
+    else:
+        await target.reply_text(text, reply_markup=keyboard)
+    return LANGUAGE_SELECT
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     uid = update.effective_user.id
+
+    if not get_lang(context, uid):
+        return await show_language_picker(update.message)
+
+    lang = get_lang(context, uid)
     photos = get_user_photos(context, uid)
     active = get_active_template(context, uid)
+    text = STRINGS[lang]["main_menu"].format(photos=len(photos), template=active or "None")
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard(lang))
+    return MAIN_MENU
 
-    text = (
-        "✨ *Image Uniquification Bot*\n\n"
-        f"📸 Stored photos: *{len(photos)}*\n"
-        f"🧩 Active template: *{active or 'None'}*\n\n"
-        "What would you like to do?"
-    )
-    await update.message.reply_text(
-        text, parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
-    )
+
+async def language_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    if query.data == "lang_en":
+        set_lang(context, uid, "en")
+    elif query.data == "lang_ru":
+        set_lang(context, uid, "ru")
+    elif query.data == "lang_pick":
+        return await show_language_picker(query, edit=True)
+
+    lang = get_lang(context, uid)
+    photos = get_user_photos(context, uid)
+    active = get_active_template(context, uid)
+    text = STRINGS[lang]["main_menu"].format(photos=len(photos), template=active or "None")
+    try:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard(lang))
+    except Exception:
+        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard(lang))
     return MAIN_MENU
 
 
@@ -873,24 +1053,14 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
+    lang = get_lang(context, uid) or "en"
 
     if query.data == "menu_upload":
+        text = STRINGS[lang]["upload_prompt"]
         try:
-            await query.edit_message_caption(
-                "📤 *Upload Photos*\n\n"
-                "Send me your photos now.\n"
-                "You can send a single photo or an album.\n\n"
-                "⚠️ *Previous photos will be replaced.*",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_caption(text, parse_mode="Markdown")
         except Exception:
-            await query.edit_message_text(
-                "📤 *Upload Photos*\n\n"
-                "Send me your photos now.\n"
-                "You can send a single photo or an album.\n\n"
-                "⚠️ *Previous photos will be replaced.*",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text(text, parse_mode="Markdown")
         return UPLOADING_PHOTOS
 
     elif query.data == "menu_get":
@@ -906,24 +1076,18 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def show_main_menu(query_or_msg, context, uid, edit=True):
+    lang = get_lang(context, uid) or "en"
     photos = get_user_photos(context, uid)
     active = get_active_template(context, uid)
-    text = (
-        "✨ *Image Uniquification Bot*\n\n"
-        f"📸 Stored photos: *{len(photos)}*\n"
-        f"🧩 Active template: *{active or 'None'}*\n\n"
-        "What would you like to do?"
-    )
+    text = STRINGS[lang]["main_menu"].format(photos=len(photos), template=active or "None")
+    kb = main_menu_keyboard(lang)
     if edit:
         try:
-            await query_or_msg.edit_message_caption(text, parse_mode="Markdown",
-                                                    reply_markup=main_menu_keyboard())
+            await query_or_msg.edit_message_caption(text, parse_mode="Markdown", reply_markup=kb)
         except Exception:
-            await query_or_msg.edit_message_text(text, parse_mode="Markdown",
-                                                 reply_markup=main_menu_keyboard())
+            await query_or_msg.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
-        await query_or_msg.reply_text(text, parse_mode="Markdown",
-                                      reply_markup=main_menu_keyboard())
+        await query_or_msg.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     return MAIN_MENU
 
 
@@ -945,7 +1109,11 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if media_group_id:
         if album_key not in context.bot_data:
-            context.bot_data[album_key] = {"file_ids": [], "media_group_id": media_group_id}
+            context.bot_data[album_key] = {
+                "file_ids": [],
+                "media_group_id": media_group_id,
+                "user": update.effective_user,
+            }
 
         context.bot_data[album_key]["file_ids"].append(file_id)
 
@@ -964,11 +1132,13 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         # Single photo — save immediately
         set_user_photos(context, uid, [file_id])
+        lang = get_lang(context, uid) or "en"
         await update.message.reply_text(
-            "✅ *1 photo saved successfully!*\n\nUse 📥 *Get Photos* to generate your unique images.",
+            STRINGS[lang]["photo_saved_1"],
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(lang),
         )
+        await _notify_monitor(update.message.get_bot(), update.effective_user, [file_id])
         return MAIN_MENU
 
 
@@ -977,43 +1147,30 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def handle_get_photos(query, context, uid) -> int:
+    lang = get_lang(context, uid) or "en"
     photos = get_user_photos(context, uid)
 
     if not photos:
+        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton(STRINGS[lang]["btn_back"], callback_data="back_main")]])
         try:
-            await query.edit_message_caption(
-                "❌ *You have no uploaded photos.*\n\nUse 📤 Upload Photos first.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data="back_main")
-                ]]),
-            )
+            await query.edit_message_caption(STRINGS[lang]["no_photos"], parse_mode="Markdown", reply_markup=back_kb)
         except Exception:
-            await query.edit_message_text(
-                "❌ *You have no uploaded photos.*\n\nUse 📤 Upload Photos first.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ Back", callback_data="back_main")
-                ]]),
-            )
+            await query.edit_message_text(STRINGS[lang]["no_photos"], parse_mode="Markdown", reply_markup=back_kb)
         return MAIN_MENU
 
     s = get_user_settings(context, uid)
+    s["_lang"] = lang
     n_photos = len(photos)
     n_gens = s["generations"]
-
+    es = "es" if n_gens > 1 else ""
+    ps = "s" if n_photos > 1 else ""
+    gen_text = STRINGS[lang]["generating"].format(
+        n_gens=n_gens, es=es, n_photos=n_photos, s=ps, total=n_gens * n_photos
+    )
     try:
-        await query.edit_message_caption(
-            f"⏳ *Generating {n_gens} batch{'es' if n_gens > 1 else ''} of {n_photos} photo{'s' if n_photos > 1 else ''}…*\n\n"
-            f"Total output: *{n_gens * n_photos} images*\n\nThis may take a while, please wait.",
-            parse_mode="Markdown",
-        )
+        await query.edit_message_caption(gen_text, parse_mode="Markdown")
     except Exception:
-        await query.edit_message_text(
-            f"⏳ *Generating {n_gens} batch{'es' if n_gens > 1 else ''} of {n_photos} photo{'s' if n_photos > 1 else ''}…*\n\n"
-            f"Total output: *{n_gens * n_photos} images*\n\nThis may take a while, please wait.",
-            parse_mode="Markdown",
-        )
+        await query.edit_message_text(gen_text, parse_mode="Markdown")
 
     await do_generate(query.message, photos, s)
     return MAIN_MENU
@@ -1041,13 +1198,14 @@ async def _process_single_batch(bot, photo_file_ids: list, s: dict, gen_idx: int
 
 
 async def do_generate(msg, photo_file_ids: list, s: dict):
-    """Run all generations concurrently and send results as batches."""
+    lang = s.get("_lang", "en")
     n_gens = s["generations"]
     n_photos = len(photo_file_ids)
+    es = "es" if n_gens > 1 else ""
 
     try:
         await msg.reply_text(
-            f"⚙️ *Generating {n_gens} batch{'es' if n_gens > 1 else ''}…*",
+            STRINGS[lang]["gen_progress"].format(n_gens=n_gens, es=es),
             parse_mode="Markdown",
         )
 
@@ -1056,36 +1214,39 @@ async def do_generate(msg, photo_file_ids: list, s: dict):
             batch = await _process_single_batch(msg._bot, photo_file_ids, s, gen_idx)
             all_results.append(batch)
 
-        # Send results in order
         for gen_idx, batch_results in enumerate(all_results):
+            cur, total = gen_idx + 1, n_gens
             if n_photos == 1:
                 await msg.reply_photo(
                     photo=batch_results[0],
-                    caption=f"✅ Batch {gen_idx + 1}/{n_gens}",
+                    caption=STRINGS[lang]["batch_label"].format(cur=cur, total=total),
                 )
             else:
                 media_group = [
                     InputMediaPhoto(
                         media=io.BytesIO(b),
-                        caption=f"Batch {gen_idx + 1}/{n_gens} — Photo {i + 1}/{n_photos}" if i > 0 else f"✅ Batch {gen_idx + 1}/{n_gens}",
+                        caption=(
+                            STRINGS[lang]["batch_label_photo"].format(cur=cur, total=total, pi=i + 1, pt=n_photos)
+                            if i > 0 else
+                            STRINGS[lang]["batch_label"].format(cur=cur, total=total)
+                        ),
                     )
                     for i, b in enumerate(batch_results)
                 ]
                 await msg.reply_media_group(media=media_group)
 
-        # Done
         await msg.reply_text(
-            f"✅ *Done! {n_gens} batch{'es' if n_gens > 1 else ''} generated.*",
+            STRINGS[lang]["done"].format(n_gens=n_gens, es=es),
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(lang),
         )
 
     except Exception as e:
         logger.error(f"Generation error: {e}")
         await msg.reply_text(
-            f"❌ *Something went wrong:* `{str(e)[:200]}`\n\nPlease try again.",
+            STRINGS[lang]["error_msg"].format(err=str(e)[:200]),
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(lang),
         )
 
 
@@ -1094,23 +1255,18 @@ async def do_generate(msg, photo_file_ids: list, s: dict):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def show_settings_menu(query, context, uid) -> int:
+    lang = get_lang(context, uid) or "en"
     keyboard = [
-        [InlineKeyboardButton("🧩 Templates",               callback_data="settings_templates")],
-        [InlineKeyboardButton("⚙️ Uniquification Settings", callback_data="settings_uniq")],
-        [InlineKeyboardButton("🔙 Back",                    callback_data="back_main")],
+        [InlineKeyboardButton(STRINGS[lang]["btn_templates"], callback_data="settings_templates")],
+        [InlineKeyboardButton(STRINGS[lang]["btn_uniq"],      callback_data="settings_uniq")],
+        [InlineKeyboardButton(STRINGS[lang]["btn_language"],  callback_data="settings_language")],
+        [InlineKeyboardButton(STRINGS[lang]["btn_back"],      callback_data="back_main")],
     ]
+    text = STRINGS[lang]["settings_title"]
     try:
-        await query.edit_message_caption(
-            "⚙️ *Settings*\n\nChoose what to configure:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await query.edit_message_caption(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
-        await query.edit_message_text(
-            "⚙️ *Settings*\n\nChoose what to configure:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     return SETTINGS_MENU
 
 
@@ -1123,6 +1279,8 @@ async def settings_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
         return await show_templates_menu(query, context, uid)
     elif query.data == "settings_uniq":
         return await show_uniq_settings(query, context, uid)
+    elif query.data == "settings_language":
+        return await show_language_picker(query, edit=True)
     elif query.data == "back_main":
         return await show_main_menu(query, context, uid)
     return SETTINGS_MENU
@@ -1133,6 +1291,7 @@ async def settings_menu_callback(update: Update, context: ContextTypes.DEFAULT_T
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def show_templates_menu(query, context, uid) -> int:
+    lang = get_lang(context, uid) or "en"
     templates = get_user_templates(context, uid)
     active = get_active_template(context, uid)
 
@@ -1141,15 +1300,12 @@ async def show_templates_menu(query, context, uid) -> int:
         label = f"{'✅ ' if name == active else ''}{name}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"tpl_view_{name}")])
 
-    keyboard.append([InlineKeyboardButton("➕ Save Current Settings as Template", callback_data="tpl_save")])
-    keyboard.append([InlineKeyboardButton("📥 Import Template",                   callback_data="tpl_import")])
-    keyboard.append([InlineKeyboardButton("🔙 Back",                              callback_data="back_settings")])
+    keyboard.append([InlineKeyboardButton(STRINGS[lang]["btn_tpl_save"],   callback_data="tpl_save")])
+    keyboard.append([InlineKeyboardButton(STRINGS[lang]["btn_tpl_import"], callback_data="tpl_import")])
+    keyboard.append([InlineKeyboardButton(STRINGS[lang]["btn_back"],       callback_data="back_settings")])
 
-    text = (
-        f"🧩 *Templates* ({len(templates)}/{MAX_TEMPLATES})\n\n"
-        f"Active: *{active or 'None'}*\n\n"
-        + ("Tap a template to manage it." if templates else "No templates yet. Save your current settings as a template.")
-    )
+    hint = STRINGS[lang]["tpl_hint_has"] if templates else STRINGS[lang]["tpl_hint_empty"]
+    text = STRINGS[lang]["tpl_title"].format(count=len(templates), max=MAX_TEMPLATES, active=active or "None", hint=hint)
     try:
         await query.edit_message_caption(text, parse_mode="Markdown",
                                          reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1164,34 +1320,24 @@ async def templates_menu_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     uid = query.from_user.id
 
+    lang = get_lang(context, uid) or "en"
+
     if query.data == "tpl_save":
         templates = get_user_templates(context, uid)
         if len(templates) >= MAX_TEMPLATES:
-            await query.answer(f"❌ Max {MAX_TEMPLATES} templates reached. Delete one first.", show_alert=True)
+            await query.answer(STRINGS[lang]["tpl_max"].format(max=MAX_TEMPLATES), show_alert=True)
             return TEMPLATES_MENU
         try:
-            await query.edit_message_caption(
-                "➕ *Save Template*\n\nType a name for this template:",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_caption(STRINGS[lang]["tpl_save_prompt"], parse_mode="Markdown")
         except Exception:
-            await query.edit_message_text(
-                "➕ *Save Template*\n\nType a name for this template:",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text(STRINGS[lang]["tpl_save_prompt"], parse_mode="Markdown")
         return TEMPLATE_SAVE_NAME
 
     elif query.data == "tpl_import":
         try:
-            await query.edit_message_caption(
-                "📥 *Import Template*\n\nPaste the template code (starts with `TPL-`):",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_caption(STRINGS[lang]["tpl_import_prompt"], parse_mode="Markdown")
         except Exception:
-            await query.edit_message_text(
-                "📥 *Import Template*\n\nPaste the template code (starts with `TPL-`):",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text(STRINGS[lang]["tpl_import_prompt"], parse_mode="Markdown")
         return TEMPLATE_IMPORT_CODE
 
     elif query.data.startswith("tpl_view_"):
@@ -1208,6 +1354,8 @@ async def templates_menu_callback(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def show_template_action(query, context, uid, name) -> int:
+    lang = get_lang(context, uid) or "en"
+    ls = STRINGS[lang]
     templates = get_user_templates(context, uid)
     active = get_active_template(context, uid)
     if name not in templates:
@@ -1216,15 +1364,15 @@ async def show_template_action(query, context, uid, name) -> int:
     is_active = name == active
     keyboard = [
         [InlineKeyboardButton(
-            "✅ Active (tap to deactivate)" if is_active else "▶️ Apply",
+            ls["tpl_btn_active"] if is_active else ls["tpl_btn_apply"],
             callback_data=f"tpl_toggle_{name}"
         )],
-        [InlineKeyboardButton("📤 Export", callback_data=f"tpl_export_{name}")],
-        [InlineKeyboardButton("🗑️ Delete", callback_data=f"tpl_delete_{name}")],
-        [InlineKeyboardButton("🔙 Back",   callback_data="back_templates")],
+        [InlineKeyboardButton(ls["tpl_btn_export"], callback_data=f"tpl_export_{name}")],
+        [InlineKeyboardButton(ls["tpl_btn_delete"], callback_data=f"tpl_delete_{name}")],
+        [InlineKeyboardButton(ls["btn_back"],        callback_data="back_templates")],
     ]
     s = templates[name]["settings"]
-    text = f"🧩 *Template: {name}*\n\n" + settings_summary(s)
+    text = ls["tpl_header"].format(name=name) + settings_summary(s, lang)
     try:
         await query.edit_message_caption(text, parse_mode="Markdown",
                                          reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1238,6 +1386,8 @@ async def template_action_callback(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
+    lang = get_lang(context, uid) or "en"
+    ls = STRINGS[lang]
     templates = get_user_templates(context, uid)
 
     if query.data == "back_templates":
@@ -1250,36 +1400,28 @@ async def template_action_callback(update: Update, context: ContextTypes.DEFAULT
         name = query.data.replace("tpl_toggle_", "")
         active = get_active_template(context, uid)
         if active == name:
-            # Deactivate
             set_active_template(context, uid, None)
-            await query.answer("Template deactivated.", show_alert=False)
+            await query.answer(ls["tpl_deactivated"], show_alert=False)
         else:
-            # Apply — copy settings to user settings
             set_user_settings(context, uid, dict(templates[name]["settings"]))
             set_active_template(context, uid, name)
-            await query.answer(f"✅ '{name}' applied!", show_alert=False)
+            await query.answer(ls["tpl_applied"].format(name=name), show_alert=False)
         return await show_template_action(query, context, uid, name)
 
     elif query.data.startswith("tpl_export_"):
         name = query.data.replace("tpl_export_", "")
         if name in templates:
             code = encode_template(templates[name]["settings"], name)
+            export_text = ls["tpl_export_msg"].format(name=name, code=code)
+            back_btn = InlineKeyboardMarkup([[
+                InlineKeyboardButton(ls["btn_back"], callback_data="back_templates")
+            ]])
             try:
-                await query.edit_message_caption(
-                    f"📤 *Export: '{name}'*\n\nShare this code:\n\n`{code}`",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Back", callback_data="back_templates")
-                    ]]),
-                )
+                await query.edit_message_caption(export_text, parse_mode="Markdown",
+                                                 reply_markup=back_btn)
             except Exception:
-                await query.edit_message_text(
-                    f"📤 *Export: '{name}'*\n\nShare this code:\n\n`{code}`",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Back", callback_data="back_templates")
-                    ]]),
-                )
+                await query.edit_message_text(export_text, parse_mode="Markdown",
+                                              reply_markup=back_btn)
         return TEMPLATE_ACTION
 
     elif query.data.startswith("tpl_delete_"):
@@ -1304,29 +1446,27 @@ async def template_save_name_received(update: Update, context: ContextTypes.DEFA
     save_user_templates(context, uid, templates)
     set_active_template(context, uid, name)
 
+    lang = get_lang(context, uid) or "en"
     await update.message.reply_text(
-        f"✅ *Template '{name}' saved and applied!*",
+        STRINGS[lang]["tpl_saved"].format(name=name),
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(lang),
     )
     return MAIN_MENU
 
 
 async def template_import_code_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
+    lang = get_lang(context, uid) or "en"
     code = update.message.text.strip()
     payload = decode_template(code)
 
     if not payload:
-        await update.message.reply_text(
-            "❌ *Invalid template code.* Try again or send /start to cancel.",
-            parse_mode="Markdown",
-        )
+        await update.message.reply_text(STRINGS[lang]["tpl_invalid_code"], parse_mode="Markdown")
         return TEMPLATE_IMPORT_CODE
 
     templates = get_user_templates(context, uid)
     name = payload["name"]
-    # Avoid name collision
     base = name
     counter = 1
     while name in templates:
@@ -1337,9 +1477,9 @@ async def template_import_code_received(update: Update, context: ContextTypes.DE
     save_user_templates(context, uid, templates)
 
     await update.message.reply_text(
-        f"✅ *Template '{name}' imported!*\n\nGo to Templates to apply it.",
+        STRINGS[lang]["tpl_imported"].format(name=name),
         parse_mode="Markdown",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(lang),
     )
     return MAIN_MENU
 
@@ -1349,34 +1489,30 @@ async def template_import_code_received(update: Update, context: ContextTypes.DE
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def show_uniq_settings(query, context, uid) -> int:
+    lang = get_lang(context, uid) or "en"
     s = get_user_settings(context, uid)
+    ls = STRINGS[lang]
+    pos_key = f"pos_{s['position']}"
+    pos_label = ls.get(pos_key, s["position"].capitalize())
     keyboard = [
-        [InlineKeyboardButton(f"🔁 Generations: {s['generations']}",         callback_data="set_generations")],
-        [InlineKeyboardButton("─── Background ───",                           callback_data="noop")],
-        [InlineKeyboardButton(f"📐 Creative Size: {s['creative_size']}/10",   callback_data="set_creative_size")],
-        [InlineKeyboardButton(f"💧 Transparency: {s['transparency']}/10",     callback_data="set_transparency")],
-        [InlineKeyboardButton(f"📍 Position: {s['position'].capitalize()}",   callback_data="set_position")],
-        [InlineKeyboardButton(f"✂️ Remove BG: {'Yes' if s['remove_bg'] else 'No'}", callback_data="toggle_remove_bg")],
-        [InlineKeyboardButton("─── Effects ───",                              callback_data="noop")],
-        [InlineKeyboardButton(f"🌀 Noise: {s['noise']}/10",                   callback_data="set_noise")],
-        [InlineKeyboardButton(f"🎨 Filter: {FILTER_LABELS[s['filter']]}",     callback_data="set_filter")],
-        [InlineKeyboardButton(f"🌫️ BG Blur: {s['blur_bg']}/10",              callback_data="set_blur_bg")],
-        [InlineKeyboardButton(f"🌫️ FG Blur: {s['blur_fg']}/10",              callback_data="set_blur_fg")],
-        [InlineKeyboardButton(f"✨ Overlay: {OVERLAY_LABELS[s['overlay']]}",  callback_data="set_overlay")],
-        [InlineKeyboardButton("🔙 Back",                                       callback_data="back_settings")],
+        [InlineKeyboardButton(f"🔁 {ls['gen_label']}: {s['generations']}",                      callback_data="set_generations")],
+        [InlineKeyboardButton("─── Background ───",                                              callback_data="noop")],
+        [InlineKeyboardButton(f"📐 {ls['cs_label']}: {s['creative_size']}/10",                  callback_data="set_creative_size")],
+        [InlineKeyboardButton(f"💧 {ls['tr_label']}: {s['transparency']}/10",                   callback_data="set_transparency")],
+        [InlineKeyboardButton(f"📍 {ls['pos_label']}: {pos_label}",                             callback_data="set_position")],
+        [InlineKeyboardButton("─── Effects ───",                                                 callback_data="noop")],
+        [InlineKeyboardButton(f"🌀 {ls['noise_label']}: {s['noise']}/10",                       callback_data="set_noise")],
+        [InlineKeyboardButton(f"🌫️ {ls['blurbg_label']}: {s['blur_bg']}/10",                   callback_data="set_blur_bg")],
+        [InlineKeyboardButton(f"{ls['overlay_label']}: {OVERLAY_LABELS[s['overlay']]}",         callback_data="set_overlay")],
+        [InlineKeyboardButton(f"{ls['ostr_label']}: {s.get('overlay_intensity', 5)}/10",        callback_data="set_overlay_intensity")],
+        [InlineKeyboardButton(f"{ls['cr_label']}: {s.get('corner_radius', 0)}/10",              callback_data="set_corner_radius")],
+        [InlineKeyboardButton(ls["btn_back"],                                                    callback_data="back_settings")],
     ]
+    text = STRINGS[lang]["uniq_title"]
     try:
-        await query.edit_message_caption(
-            "⚙️ *Uniquification Settings*\n\nTap any setting to change it:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await query.edit_message_caption(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
-        await query.edit_message_text(
-            "⚙️ *Uniquification Settings*\n\nTap any setting to change it:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
     return UNIQ_SETTINGS_MENU
 
 
@@ -1385,6 +1521,7 @@ async def uniq_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     uid = query.from_user.id
     s = get_user_settings(context, uid)
+    lang = get_lang(context, uid) or "en"
 
     if query.data == "noop":
         return UNIQ_SETTINGS_MENU
@@ -1395,11 +1532,6 @@ async def uniq_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif query.data == "back_uniq":
         return await show_uniq_settings(query, context, uid)
 
-    elif query.data == "toggle_remove_bg":
-        s["remove_bg"] = not s["remove_bg"]
-        set_user_settings(context, uid, s)
-        return await show_uniq_settings(query, context, uid)
-
     elif query.data == "set_position":
         s["position"] = "random" if s["position"] == "center" else "center"
         set_user_settings(context, uid, s)
@@ -1407,90 +1539,78 @@ async def uniq_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     elif query.data == "set_generations":
         keyboard = build_scale_keyboard("gen", 1, 10, s["generations"], "back_uniq")
+        t = STRINGS[lang]["gen_desc"]
         try:
-            await query.edit_message_caption("🔁 *Generations*\n\nChoose how many unique batches to generate (1–10):",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("🔁 *Generations*\n\nChoose how many unique batches to generate (1–10):",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_GENERATIONS
 
     elif query.data == "set_creative_size":
         keyboard = build_scale_keyboard("cs", 1, 10, s["creative_size"], "back_uniq")
+        t = STRINGS[lang]["cs_desc"]
         try:
-            await query.edit_message_caption("📐 *Creative Size*\n\n1 = very small, 10 = fills most of background:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("📐 *Creative Size*\n\n1 = very small, 10 = fills most of background:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_CREATIVE_SIZE
 
     elif query.data == "set_transparency":
         keyboard = build_scale_keyboard("tr", 1, 10, s["transparency"], "back_uniq")
+        t = STRINGS[lang]["tr_desc"]
         try:
-            await query.edit_message_caption("💧 *Transparency*\n\n1 = nearly invisible, 10 = fully opaque:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("💧 *Transparency*\n\n1 = nearly invisible, 10 = fully opaque:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_TRANSPARENCY
 
     elif query.data == "set_noise":
         keyboard = build_scale_keyboard("noise", 0, 10, s["noise"], "back_uniq")
+        t = STRINGS[lang]["noise_desc"]
         try:
-            await query.edit_message_caption("🌀 *Noise*\n\n0 = none, 10 = heavy grain:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("🌀 *Noise*\n\n0 = none, 10 = heavy grain:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_NOISE
 
     elif query.data == "set_blur_bg":
         keyboard = build_scale_keyboard("blurbg", 0, 10, s["blur_bg"], "back_uniq")
+        t = STRINGS[lang]["blurbg_desc"]
         try:
-            await query.edit_message_caption("🌫️ *Background Blur*\n\n0 = sharp, 10 = heavily blurred:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("🌫️ *Background Blur*\n\n0 = sharp, 10 = heavily blurred:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_BLUR_BG
 
-    elif query.data == "set_blur_fg":
-        keyboard = build_scale_keyboard("blurfg", 0, 10, s["blur_fg"], "back_uniq")
+    elif query.data == "set_overlay_intensity":
+        keyboard = build_scale_keyboard("ostr", 1, 10, s.get("overlay_intensity", 5), "back_uniq")
+        t = STRINGS[lang]["ostr_desc"]
         try:
-            await query.edit_message_caption("🌫️ *Foreground Blur*\n\n0 = sharp, 10 = heavily blurred:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("🌫️ *Foreground Blur*\n\n0 = sharp, 10 = heavily blurred:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        return SET_BLUR_FG
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        return SET_OVERLAY_INTENSITY
 
-    elif query.data == "set_filter":
-        keyboard = [
-            [InlineKeyboardButton(label, callback_data=f"filter_{key}")]
-            for key, label in FILTER_LABELS.items()
-        ]
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_uniq")])
+    elif query.data == "set_corner_radius":
+        keyboard = build_scale_keyboard("cr", 0, 10, s.get("corner_radius", 0), "back_uniq")
+        t = STRINGS[lang]["cr_desc"]
         try:
-            await query.edit_message_caption("🎨 *Filter*\n\nChoose a colour filter for the background:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("🎨 *Filter*\n\nChoose a colour filter for the background:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        return SET_FILTER
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        return SET_CORNER_RADIUS
 
     elif query.data == "set_overlay":
         keyboard = [
             [InlineKeyboardButton(label, callback_data=f"overlay_{key}")]
             for key, label in OVERLAY_LABELS.items()
         ]
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_uniq")])
+        keyboard.append([InlineKeyboardButton(STRINGS[lang]["btn_back"], callback_data="back_uniq")])
+        t = STRINGS[lang]["overlay_desc"]
         try:
-            await query.edit_message_caption("✨ *Overlay*\n\nChoose an overlay effect:",
-                                             parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_caption(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.edit_message_text("✨ *Overlay*\n\nChoose an overlay effect:",
-                                          parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_OVERLAY
 
     return UNIQ_SETTINGS_MENU
@@ -1534,7 +1654,8 @@ async def scale_value_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "tr":     "transparency",
             "noise":  "noise",
             "blurbg": "blur_bg",
-            "blurfg": "blur_fg",
+            "ostr":   "overlay_intensity",
+            "cr":     "corner_radius",
         }
         if prefix in mapping:
             s[mapping[prefix]] = val
@@ -1542,24 +1663,6 @@ async def scale_value_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return await show_uniq_settings(query, context, uid)
 
     return UNIQ_SETTINGS_MENU
-
-
-async def filter_value_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    s = get_user_settings(context, uid)
-
-    if query.data == "back_uniq":
-        return await show_uniq_settings(query, context, uid)
-
-    if query.data.startswith("filter_"):
-        key = query.data.replace("filter_", "")
-        if key in FILTER_LABELS:
-            s["filter"] = key
-            set_user_settings(context, uid, s)
-
-    return await show_uniq_settings(query, context, uid)
 
 
 async def overlay_value_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1735,10 +1838,12 @@ async def admin_upload_bg(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ── Cancel ─────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    lang = get_lang(context, uid) or "en"
     context.user_data.clear()
     await update.message.reply_text(
-        "Cancelled. Send /start to begin again.",
-        reply_markup=main_menu_keyboard(),
+        STRINGS[lang]["cancel_msg"],
+        reply_markup=main_menu_keyboard(lang),
     )
     return MAIN_MENU
 
@@ -1750,7 +1855,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 def main() -> None:
     init_bg_db()
     os.makedirs("/data", exist_ok=True)
-    os.makedirs("/data/u2net_models", exist_ok=True)
     persistence = PicklePersistence(filepath="/data/bot_persistence.pkl")
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
@@ -1759,7 +1863,7 @@ def main() -> None:
     app.job_queue.run_repeating(check_bg_pool, interval=60, first=30)
 
     # Scale value pattern covers all numeric selectors
-    scale_pattern = r"^(gen|cs|tr|noise|blurbg|blurfg)_val_\d+$"
+    scale_pattern = r"^(gen|cs|tr|noise|blurbg|ostr|cr)_val_\d+$"
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -1773,8 +1877,11 @@ def main() -> None:
                 MessageHandler(filters.Document.IMAGE, photo_received),
                 CallbackQueryHandler(main_menu_callback, pattern="^(menu_upload|menu_get|menu_settings|back_main)$"),
             ],
+            LANGUAGE_SELECT: [
+                CallbackQueryHandler(language_select_callback, pattern="^(lang_en|lang_ru|lang_pick)$"),
+            ],
             SETTINGS_MENU: [
-                CallbackQueryHandler(settings_menu_callback, pattern="^(settings_templates|settings_uniq|back_main)$"),
+                CallbackQueryHandler(settings_menu_callback, pattern="^(settings_templates|settings_uniq|settings_language|back_main)$"),
             ],
             TEMPLATES_MENU: [
                 CallbackQueryHandler(templates_menu_callback,
@@ -1792,9 +1899,9 @@ def main() -> None:
             ],
             UNIQ_SETTINGS_MENU: [
                 CallbackQueryHandler(uniq_settings_callback,
-                                     pattern="^(noop|back_settings|back_uniq|toggle_remove_bg|set_position|"
+                                     pattern="^(noop|back_settings|back_uniq|set_position|"
                                              "set_generations|set_creative_size|set_transparency|set_noise|"
-                                             "set_filter|set_blur_bg|set_blur_fg|set_overlay)$"),
+                                             "set_blur_bg|set_overlay|set_overlay_intensity|set_corner_radius)$"),
             ],
             SET_GENERATIONS: [
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
@@ -1816,15 +1923,16 @@ def main() -> None:
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
                 CallbackQueryHandler(scale_value_callback, pattern="^back_uniq$"),
             ],
-            SET_BLUR_FG: [
+            SET_OVERLAY: [
+                CallbackQueryHandler(overlay_value_callback, pattern="^(overlay_.+|back_uniq)$"),
+            ],
+            SET_OVERLAY_INTENSITY: [
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
                 CallbackQueryHandler(scale_value_callback, pattern="^back_uniq$"),
             ],
-            SET_FILTER: [
-                CallbackQueryHandler(filter_value_callback, pattern="^(filter_.+|back_uniq)$"),
-            ],
-            SET_OVERLAY: [
-                CallbackQueryHandler(overlay_value_callback, pattern="^(overlay_.+|back_uniq)$"),
+            SET_CORNER_RADIUS: [
+                CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
+                CallbackQueryHandler(scale_value_callback, pattern="^back_uniq$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

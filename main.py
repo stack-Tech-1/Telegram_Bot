@@ -367,7 +367,8 @@ logger = logging.getLogger(__name__)
     SET_OVERLAY_INTENSITY,
     SET_CORNER_RADIUS,
     LANGUAGE_SELECT,
-) = range(18)
+    SET_CUSTOM_PROMPT,
+) = range(19)
 
 # ── Default Settings ───────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
@@ -380,6 +381,7 @@ DEFAULT_SETTINGS = {
     "overlay":           "none",
     "overlay_intensity": 5,
     "corner_radius":     0,
+    "custom_prompt":     "",
 }
 
 OVERLAY_LABELS = {
@@ -462,6 +464,16 @@ STRINGS = {
         "tpl_applied":          "✅ '{name}' applied!",
         "tpl_export_msg":       "📤 *Export: '{name}'*\n\nShare this code:\n\n`{code}`",
         "tpl_header":           "🧩 *Template: {name}*\n\n",
+        "cp_label":             "🎨 Custom BG Prompt",
+        "cp_none":              "None",
+        "cp_desc":              "🎨 *Custom Background Prompt*\n\nType a description of the background you want AI to generate.\n\n_Example: sunset beach with golden sand_\n\nSend /clear to remove your current prompt.",
+        "cp_cleared":           "✅ Custom prompt cleared.",
+        "cp_saved":             "✅ Custom prompt set!",
+        "gen_ubgs_btn":         "🔄 Generate My Backgrounds ({n})",
+        "gen_ubgs_no_prompt":   "❌ Set a custom prompt first.",
+        "gen_ubgs_busy":        "⏳ Already generating, please wait.",
+        "gen_ubgs_start":       "⏳ Generating {n} backgrounds for you…",
+        "gen_ubgs_done":        "✅ {n} backgrounds ready for your next generation!",
     },
     "ru": {
         "choose_language":      "🌐 Пожалуйста, выберите язык:",
@@ -530,6 +542,16 @@ STRINGS = {
         "tpl_applied":          "✅ '{name}' применён!",
         "tpl_export_msg":       "📤 *Экспорт: '{name}'*\n\nПоделитесь этим кодом:\n\n`{code}`",
         "tpl_header":           "🧩 *Шаблон: {name}*\n\n",
+        "cp_label":             "🎨 Свой промпт фона",
+        "cp_none":              "Нет",
+        "cp_desc":              "🎨 *Свой промпт фона*\n\nВведите описание фона, который хотите сгенерировать.\n\n_Пример: закат на пляже с золотым песком_\n\nОтправьте /clear чтобы удалить текущий промпт.",
+        "cp_cleared":           "✅ Свой промпт удалён.",
+        "cp_saved":             "✅ Свой промпт сохранён!",
+        "gen_ubgs_btn":         "🔄 Сгенерировать мои фоны ({n})",
+        "gen_ubgs_no_prompt":   "❌ Сначала задайте свой промпт.",
+        "gen_ubgs_busy":        "⏳ Уже генерирую, пожалуйста подождите.",
+        "gen_ubgs_start":       "⏳ Генерирую {n} фонов для вас…",
+        "gen_ubgs_done":        "✅ {n} фонов готово для следующей генерации!",
     },
 }
 
@@ -624,7 +646,8 @@ def settings_summary(s: dict, lang: str = "en") -> str:
         f"{ls['blurbg_label']}: *{s['blur_bg']}/10*\n"
         f"{ls['overlay_label']}: *{OVERLAY_LABELS[s['overlay']]}*\n"
         f"{ls['ostr_label']}: *{s.get('overlay_intensity', 5)}/10*\n"
-        f"{ls['cr_label']}: *{s.get('corner_radius', 0)}/10*"
+        f"{ls['cr_label']}: *{s.get('corner_radius', 0)}/10*\n"
+        f"{ls['cp_label']}: *{(s.get('custom_prompt','')[:20] + '…') if len(s.get('custom_prompt','')) > 20 else (s.get('custom_prompt','') or ls['cp_none'])}*"
     )
 
 
@@ -649,12 +672,28 @@ def init_bg_db():
         )
     """)
     con.commit()
+    try:
+        con.execute("ALTER TABLE backgrounds ADD COLUMN user_id INTEGER")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass
+    con.execute("CREATE INDEX IF NOT EXISTS idx_bg_user ON backgrounds(user_id)")
+    con.commit()
     con.close()
 
 
-def get_random_background() -> tuple:
+def get_random_background(uid: int | None = None) -> tuple:
     con = sqlite3.connect("/data/backgrounds.db", timeout=5)
-    row = con.execute("SELECT id, filename FROM backgrounds ORDER BY RANDOM() LIMIT 1").fetchone()
+    row = None
+    if uid:
+        row = con.execute(
+            "SELECT id, filename FROM backgrounds WHERE user_id=? ORDER BY RANDOM() LIMIT 1",
+            (uid,),
+        ).fetchone()
+    if not row:
+        row = con.execute(
+            "SELECT id, filename FROM backgrounds WHERE user_id IS NULL ORDER BY RANDOM() LIMIT 1"
+        ).fetchone()
     con.close()
     if not row:
         raise RuntimeError(
@@ -664,6 +703,13 @@ def get_random_background() -> tuple:
     bg_id, filename = row
     img = Image.open(f"/data/backgrounds/{filename}").convert("RGBA")
     return bg_id, img.resize(BG_SIZE, Image.LANCZOS)
+
+
+def get_user_bg_count(uid: int) -> int:
+    con = sqlite3.connect("/data/backgrounds.db", timeout=5)
+    n = con.execute("SELECT COUNT(*) FROM backgrounds WHERE user_id=?", (uid,)).fetchone()[0]
+    con.close()
+    return n
 
 
 def delete_background(bg_id: int) -> None:
@@ -679,11 +725,11 @@ def delete_background(bg_id: int) -> None:
             pass
 
 
-def add_background_to_db(img: Image.Image, category: str, prompt: str | None, added_by: int | None) -> int:
+def add_background_to_db(img: Image.Image, category: str, prompt: str | None, added_by: int | None, user_id: int | None = None) -> int:
     con = sqlite3.connect("/data/backgrounds.db", timeout=5)
     cur = con.execute(
-        "INSERT INTO backgrounds (filename, category, prompt, added_by, added_at) VALUES (?,?,?,?,?)",
-        ("", category, prompt, added_by, time.time()),
+        "INSERT INTO backgrounds (filename, category, prompt, added_by, added_at, user_id) VALUES (?,?,?,?,?,?)",
+        ("", category, prompt, added_by, time.time(), user_id),
     )
     new_id = cur.lastrowid
     con.commit()
@@ -1160,6 +1206,7 @@ async def handle_get_photos(query, context, uid) -> int:
 
     s = get_user_settings(context, uid)
     s["_lang"] = lang
+    s["_uid"] = uid
     n_photos = len(photos)
     n_gens = s["generations"]
     es = "es" if n_gens > 1 else ""
@@ -1183,7 +1230,8 @@ async def _process_single_batch(bot, photo_file_ids: list, s: dict, gen_idx: int
         file = await bot.get_file(file_id)
         image_bytes = bytes(await file.download_as_bytearray())
 
-        bg_id, bg_img = get_random_background()
+        uid = s.get("_uid")
+        bg_id, bg_img = get_random_background(uid if s.get("custom_prompt") else None)
         await asyncio.to_thread(delete_background, bg_id)
 
         result_bytes = await asyncio.to_thread(
@@ -1506,6 +1554,9 @@ async def show_uniq_settings(query, context, uid) -> int:
         [InlineKeyboardButton(f"{ls['overlay_label']}: {OVERLAY_LABELS[s['overlay']]}",         callback_data="set_overlay")],
         [InlineKeyboardButton(f"{ls['ostr_label']}: {s.get('overlay_intensity', 5)}/10",        callback_data="set_overlay_intensity")],
         [InlineKeyboardButton(f"{ls['cr_label']}: {s.get('corner_radius', 0)}/10",              callback_data="set_corner_radius")],
+        [InlineKeyboardButton("─── Background AI ───",                                           callback_data="noop")],
+        [InlineKeyboardButton(f"{ls['cp_label']}: {(s.get('custom_prompt','')[:20] + '…') if len(s.get('custom_prompt','')) > 20 else (s.get('custom_prompt','') or ls['cp_none'])}", callback_data="set_custom_prompt")],
+        [InlineKeyboardButton(ls["gen_ubgs_btn"].format(n=get_user_bg_count(uid)),              callback_data="gen_user_bgs")],
         [InlineKeyboardButton(ls["btn_back"],                                                    callback_data="back_settings")],
     ]
     text = STRINGS[lang]["uniq_title"]
@@ -1612,6 +1663,29 @@ async def uniq_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             await query.edit_message_text(t, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return SET_OVERLAY
+
+    elif query.data == "set_custom_prompt":
+        t = STRINGS[lang]["cp_desc"]
+        try:
+            await query.edit_message_caption(t, parse_mode="Markdown")
+        except Exception:
+            await query.edit_message_text(t, parse_mode="Markdown")
+        return SET_CUSTOM_PROMPT
+
+    elif query.data == "gen_user_bgs":
+        cp = s.get("custom_prompt", "")
+        if not cp:
+            await query.answer(STRINGS[lang]["gen_ubgs_no_prompt"], show_alert=True)
+            return UNIQ_SETTINGS_MENU
+        if uid in _user_gen_locks:
+            await query.answer(STRINGS[lang]["gen_ubgs_busy"], show_alert=True)
+            return UNIQ_SETTINGS_MENU
+        _user_gen_locks.add(uid)
+        asyncio.create_task(_generate_user_backgrounds(
+            context.bot, uid, query.message.chat_id, lang, cp
+        ))
+        await query.answer(STRINGS[lang]["gen_ubgs_start"].format(n=10), show_alert=False)
+        return await show_uniq_settings(query, context, uid)
 
     return UNIQ_SETTINGS_MENU
 
@@ -1741,6 +1815,23 @@ async def gen_bgs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 _generation_running = False
+_user_gen_locks: set = set()
+
+
+async def _generate_user_backgrounds(bot, uid: int, chat_id: int, lang: str, prompt: str, n: int = 10):
+    try:
+        msg = await bot.send_message(chat_id, STRINGS[lang]["gen_ubgs_start"].format(n=n))
+        done = 0
+        for _ in range(n):
+            try:
+                img = await asyncio.to_thread(fetch_cloudflare_image, prompt)
+                await asyncio.to_thread(add_background_to_db, img, "custom", prompt, uid, uid)
+                done += 1
+            except Exception as e:
+                logger.warning(f"User bg gen failed uid={uid}: {e}")
+        await msg.edit_text(STRINGS[lang]["gen_ubgs_done"].format(n=done))
+    finally:
+        _user_gen_locks.discard(uid)
 
 
 async def _auto_replenish_worker(target: int = 500) -> None:
@@ -1835,6 +1926,37 @@ async def admin_upload_bg(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return MAIN_MENU
 
 
+# ── Custom Prompt Input ────────────────────────────────────────────────────────
+
+async def custom_prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    lang = get_lang(context, uid) or "en"
+    text = update.message.text.strip()[:200]
+    s = get_user_settings(context, uid)
+    s["custom_prompt"] = text
+    set_user_settings(context, uid, s)
+    await update.message.reply_text(
+        STRINGS[lang]["cp_saved"],
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(lang),
+    )
+    return MAIN_MENU
+
+
+async def clear_custom_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    lang = get_lang(context, uid) or "en"
+    s = get_user_settings(context, uid)
+    s["custom_prompt"] = ""
+    set_user_settings(context, uid, s)
+    await update.message.reply_text(
+        STRINGS[lang]["cp_cleared"],
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(lang),
+    )
+    return MAIN_MENU
+
+
 # ── Cancel ─────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1901,7 +2023,8 @@ def main() -> None:
                 CallbackQueryHandler(uniq_settings_callback,
                                      pattern="^(noop|back_settings|back_uniq|set_position|"
                                              "set_generations|set_creative_size|set_transparency|set_noise|"
-                                             "set_blur_bg|set_overlay|set_overlay_intensity|set_corner_radius)$"),
+                                             "set_blur_bg|set_overlay|set_overlay_intensity|set_corner_radius|"
+                                             "set_custom_prompt|gen_user_bgs)$"),
             ],
             SET_GENERATIONS: [
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
@@ -1933,6 +2056,11 @@ def main() -> None:
             SET_CORNER_RADIUS: [
                 CallbackQueryHandler(scale_value_callback, pattern=scale_pattern),
                 CallbackQueryHandler(scale_value_callback, pattern="^back_uniq$"),
+            ],
+            SET_CUSTOM_PROMPT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, custom_prompt_received),
+                CommandHandler("clear", clear_custom_prompt),
+                CommandHandler("cancel", cancel),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
